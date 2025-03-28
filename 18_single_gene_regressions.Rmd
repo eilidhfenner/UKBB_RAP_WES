@@ -1,0 +1,359 @@
+---
+title: "18_single_gene_regressions"
+output:
+  pdf_document: default
+  html_document: default
+date: "2024-10-01"
+---
+
+# Single gene regressions
+This script reads in phenotypic data and tables of counts, and then runs regressions on these data. This script was run on a mem2_ssd2_v2_x16 RStudio instance, and took 3h30mins to run costing £2.20. 
+
+
+# Load libraries
+```{r}
+library(data.table)
+library(dplyr)
+library(purrr)
+install.packages('broom')
+library(broom)
+
+```
+
+# Prep data
+## Read in cognitive phenotypes
+```{r}
+system('dx download ./phenotype_cohorts/processed_cognition/processed_cog_tests_inc_g_Feb24.csv')
+phen=read.csv('processed_cog_tests_inc_g_Feb24.csv', header=T)
+
+```
+
+## Ancestries
+```{r}
+system('dx download ./genetic_ancestries/app15175_ids/full_dataset_inferred_ancestries.csv')
+ancs_wrongid=read.csv('full_dataset_inferred_ancestries.csv', header=T)
+system('dx download ./genetic_ancestries/app15175_ids/PCAs_*')
+EUR_PCs_wrongid=read.table('PCAs_EUR_only.tsv', header=T)
+AAC_PCs_wrongid=read.table('PCAs_AAC_only.tsv', header=T)
+EAS_PCs_wrongid=read.table('PCAs_EAS_only.tsv', header=T)
+LAT_PCs_wrongid=read.table('PCAs_LAT_only.tsv', header=T)
+SAS_PCs_wrongid=read.table('PCAs_SAS_only.tsv', header=T)
+SSA_PCs_wrongid=read.table('PCAs_SSA_only.tsv', header=T)
+ADM_PCs_wrongid=read.table('PCAs_ADM_only.tsv', header=T)
+
+system('dx download ./phenotype_cohorts/link_AD.app15175_George.app14421_Xav.app17044_JW.app13310.txt')
+link_ids=read.table('link_AD.app15175_George.app14421_Xav.app17044_JW.app13310.txt', header=T)
+ancs=merge(ancs_wrongid, link_ids, by.x='FID', by.y='app15175')
+ancs=merge(ancs, EUR_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+ancs=merge(ancs, AAC_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+ancs=merge(ancs, EAS_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+ancs=merge(ancs, LAT_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+ancs=merge(ancs, SAS_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+ancs=merge(ancs, SSA_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+ancs=merge(ancs, ADM_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+
+# Write out now have correct IDs
+write.csv(ancs, 'ancestries_PCs.csv')
+system('dx upload ancestries_PCs.csv ./genetic_ancestries/')
+
+# Merge 
+phen=merge(phen, ancs, by.x = 'eid', by.y='eid_13310')
+
+```
+
+## QC
+Filter to those passing the final QC stage (sex imputation)
+```{r}
+system('dx download ./WES_QC/discordant_sex_ids.csv')
+ids_to_rm=read.csv('discordant_sex_ids.csv')
+ids_to_rm$remove=T
+
+phen=merge(phen, ids_to_rm, by.x = 'eid', by.y='x', all=T)
+phen=subset(phen, is.na(phen$remove)) 
+
+```
+
+## Covariates
+Read in covariates (and prep for use). These phenotypes were selected in cohort browser and written out using the Table Exporter tool. 
+```{r}
+system('dx download ./phenotype_cohorts/covars_participant.csv')
+covars=read.csv('covars_participant.csv', header=T)
+
+covars$seq_batch<-covars$p32050
+covars$AC_attended<-covars$p54_i0
+covars$sex_1male[covars$p31 == 'Male']<-1
+covars$sex_1male[covars$p31 == 'Female']<-2
+covars$standardised_age <- (covars$p21022 - mean(covars$p21022, na.rm = TRUE)) / sd(covars$p21022, na.rm = TRUE)
+covars$standardised_age_squared<-covars$standardised_age*covars$standardised_age
+covars$sex_standardised_age<-covars$sex_1male * covars$standardised_age
+covars$sex_standardised_age_squared<-covars$sex_1male * covars$standardised_age_squared
+
+
+phen=merge(phen, covars, by.x='eid', by.y='eid')
+
+
+```
+
+## Diagnoses 
+These phenotypes were selected in cohort browser and written out using the Table Exporter tool. 
+```{r}
+system('dx download ./phenotypes_cog_diagnoses_participation_death.csv')
+diagnoses=read.csv('phenotypes_cog_diagnoses_participation_death.csv', header=T)
+
+# Make subset of people diagnosed with SZ - to run these regressions in if powered? 
+sz_diagnosed=subset(diagnoses, diagnoses$SZ==T) 
+sz_diagnosed_eur_only=subset(sz_diagnosed, sz_diagnosed$EUR>0.8)
+
+# Remove people with SZ, ID and/or ASD 
+diagnoses=subset(diagnoses, diagnoses$SZ==F & diagnoses$ASD==F & diagnoses$intellectual_disability==F) 
+diagnoses$no_diagnoses<-T
+diagnoses=diagnoses[,c(3,174)]
+
+phen=merge(phen, diagnoses, by='eid') 
+```
+
+
+# AC5orless -  single gene regression
+Each type of variant is run separately below, as this process takes a while and it's good to see the progess, and know saving out has worked after each variant. 
+## Prepare covars
+```{r}
+AC = '5orless'
+
+system('dx download ./Variant_counts/Gene_sets/Feb25/exome_wide_synonymous_AC5orless_counts.csv')
+a=read.csv('exome_wide_synonymous_AC5orless_counts.csv')
+phen=merge(phen, a, by.x='eid', by.y='Sample_ID')
+
+# List covars
+covars_Eu_anc_NS <- 'seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + sex_standardised_age + sex_standardised_age_squared + synonymous_AC5orless_exome_wide_total + AAC + EAS + LAT + SAS + EU_PC1 + EU_PC2 + EU_PC3 + EU_PC4 + EU_PC5 + EU_PC6 + EU_PC7 + EU_PC8 + EU_PC9 + EU_PC10'
+
+```
+
+
+## PTVs
+```{r}
+# Read in 
+system('dx download ./Variant_counts/Gene_sets/single_gene/single_gene_tests_PTV_AC5orless_counts.csv')
+ptv_single_gene=read.csv('single_gene_tests_PTV_AC5orless_counts.csv')
+all_ancs=merge(phen, ptv_single_gene, by.x='eid', by.y='Sample_ID')
+EU_ancs=subset(all_ancs, all_ancs$EUR>0.8) 
+
+# Set up gene list 
+genes=ptv_single_gene[,-2]
+genes=genes[,-1]
+sets <- as.list(colnames(genes))
+var<-'PTV'
+dependent_var<-list('g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm')
+
+# Set up empty results table
+results <- data.frame(
+  gene_set=character(),
+  dep_var = character(),
+  indep_var = character(),
+  allele_count = numeric(),
+  beta = numeric(),
+  SE = numeric(),
+  lower_CI = numeric(),
+  upper_CI = numeric(),
+  p_value = numeric(),
+  n_vars = integer(),
+  n_people = integer(),
+  ancestry=character(),
+  stringsAsFactors = FALSE
+)
+
+
+# Loop through each gene
+for (dep_var in dependent_var){
+  for (set in sets) {
+      independent_var <- paste0(set)
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_NS))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE=SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+  }
+}
+
+write.csv(results, 'PTV_EUR_anc_AC5orless_single_gene_burden.csv')
+system('dx upload PTV_EUR_anc_AC5orless_single_gene_burden.csv --destination ./Variant_counts/Gene_sets/single_gene/')
+```
+## REVEL >0.75 missense
+```{r}
+system('dx download ./Variant_counts/Gene_sets/single_gene/single_gene_tests_REVEL75_Miss_AC5orless_counts.csv')
+
+#Clear big ptv file first
+rm(ptv_single_gene)
+gc()
+
+# Read in
+miss_single_gene=read.csv('single_gene_tests_REVEL75_Miss_AC5orless_counts.csv')
+all_ancs=merge(phen, miss_single_gene, by.x='eid', by.y='Sample_ID')
+EU_ancs=subset(all_ancs, all_ancs$EUR>0.8) 
+
+# Set up gene list 
+genes=miss_single_gene[,-2]
+genes=genes[,-1]
+sets <- as.list(colnames(genes))
+var<-'REVEL75_Miss'
+dependent_var<-list('g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm')
+
+# Set up empty results table
+results <- data.frame(
+  gene_set=character(),
+  dep_var = character(),
+  indep_var = character(),
+  allele_count = numeric(),
+  beta = numeric(),
+  SE = numeric(),
+  lower_CI = numeric(),
+  upper_CI = numeric(),
+  p_value = numeric(),
+  n_vars = integer(),
+  n_people = integer(),
+  ancestry=character(),
+  stringsAsFactors = FALSE
+)
+
+
+# Loop through each gene
+for (dep_var in dependent_var){
+  for (set in sets) {
+      independent_var <- paste0(set)
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_NS))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE=SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+  }
+}
+
+write.csv(results, 'REVEL75_Miss_EUR_anc_AC5orless_single_gene_burden.csv')
+system('dx upload REVEL75_Miss_EUR_anc_AC5orless_single_gene_burden.csv --destination ./Variant_counts/Gene_sets/single_gene/')
+```
+
+
+## REVEL miss + PTVS
+```{r}
+system('dx download ./Variant_counts/Gene_sets/single_gene/single_gene_tests_PTVplusMiss_AC5orless_counts.csv')
+both_single_gene=read.csv('single_gene_tests_PTVplusMiss_AC5orless_counts.csv')
+all_ancs=merge(phen, both_single_gene, by.x='eid', by.y='Sample_ID')
+EU_ancs=subset(all_ancs, all_ancs$EUR>0.8) 
+
+# Set up gene list 
+genes=both_single_gene[,-2]
+genes=genes[,-1]
+sets <- as.list(colnames(genes))
+var<-'PTVs_and_miss'
+dependent_var<-list('g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm')
+
+# Set up empty results table
+results <- data.frame(
+  gene_set=character(),
+  dep_var = character(),
+  indep_var = character(),
+  allele_count = numeric(),
+  beta = numeric(),
+  SE = numeric(),
+  lower_CI = numeric(),
+  upper_CI = numeric(),
+  p_value = numeric(),
+  n_vars = integer(),
+  n_people = integer(),
+  ancestry=character(),
+  stringsAsFactors = FALSE
+)
+
+
+# Loop through each gene
+for (dep_var in dependent_var){
+  for (set in sets) {
+      independent_var <- paste0(set)
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_NS))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE=SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+  }
+}
+
+write.csv(results, 'PTVs_and_Miss_EUR_anc_AC5orless_single_gene_burden.csv')
+system('dx upload PTVs_and_Miss_EUR_anc_AC5orless_single_gene_burden.csv --destination ./Variant_counts/Gene_sets/single_gene/')
+```

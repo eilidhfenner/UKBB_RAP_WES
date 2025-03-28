@@ -1,0 +1,52 @@
+---
+title: "6_relatedness_filtering" 
+output: html_document
+---
+# 6. Relatedness filtering 
+This script reads in estimates of pairwise kinship co-efficients from array data, and uses this to determine which individuals need to be excluded based on relatedness. I ran this using a mem2_ssd2_v2_x96 instance, and this script took arouns 3 hours to run, costing £11.
+
+## Running .Rmd scripts in the RAP 
+To work on the RMarkdown environment in RAP, you need to download scripts from your project. You can do this using dx download in the terminal in RMd ('dx downlaod ./path/to/script.Rmd') and then opening this from the environment. When you're done with editing your script, save it in Rmd and then use the final command in this script to upload the updated version to your project. 
+
+## Load in libraries you need
+```{r}
+install.packages("ukbtools")
+library(ukbtools)
+library(data.table)
+```
+## Determining relatedness
+Relatedness of participants is calculated using the kinship matrix available from UK Biobank. This kinship matrix provides estimates of pair-wise kinship coefficients between all samples, calculated using array data. The UKBB provides a kinship matrix including pairs of individuals and their KING kinship co-efficient. Kinship values are between -1 and 0.499 and these estimate the level of relatedness between each pair of individuals accurately enough to separate 3rd or 4th degree relatives from non-related individuals. The lower the kinship co-efficient, the less related a pair of individuals are.
+Below, we use the command 'ukb_gen_samples_to_remove' from the ukbtools package, an R package designed for use with UKBB data, which provides a list of participants to remove to achieve a maximal set of unrelated individuals. This is achieved by removing individuals with the most relations first, and then when left with pairs of individuals related to only one other person, randomly selecting which individual to remove. The command is used with a kinship co-efficient cut-off > 0.0442, to remove first, second and third-degree relations. 
+Note that the command to select related samples to remove is very slow to run!!
+```{r}
+# Download files you need, including a list of sample ids that are in your matrix tables at the moment.
+system("dx download './Bulk/Genotype Results/Genotype calls/ukb_rel.dat'")
+system("dx download ./WES_QC/ids_with_call_rate_over_80_percent.tsv") #This is the file of IDs of the 469151 samples who have passed QC so far.
+
+array_rel <- read.delim("ukb_rel.dat", sep = "")
+samples <- read.table("ids_with_call_rate_over_80_percent.tsv", header = TRUE)
+s = samples$x
+to_rm <- ukb_gen_samples_to_remove(array_rel, s, cutoff = 0.0442)
+# ^ Here this returns 69,274 related individuals to remove.
+rm3rd <- as.data.table(to_rm)
+write.table(rm3rd, "3rd_degree_rel_ids_to_rm_500k.tsv", row.names = FALSE)
+# Save this list to your project to be sure its safe as forming it takes so long!
+system("dx upload 3rd_degree_rel_ids_to_rm_500k.tsv ./WES_QC/")
+# Compute IDs to keep (HQ samples that arent in the removal list)
+to_keep = setdiff(s, to_rm)
+keep_ids <- as.data.table(to_keep)
+# Save the list of IDs to keep
+write.table(keep_ids, "3rd_degree_rel_ids_to_keep_500k.tsv",
+            row.names = FALSE, col.names = FALSE, quote = FALSE)
+# Upload the file to the project
+system("dx upload 3rd_degree_rel_ids_to_keep_500k.tsv ./WES_QC/")
+
+# Remove the old rlang package as it stops dplyr working
+detach("package:rlang", unload = TRUE)
+library(dplyr)
+# Annotate the original individual list with whether they should be kepy based on relatedness.
+rm3rd$Remove_based_on_relatedness_filtering <- TRUE
+all_annotations = merge(samples, rm3rd, by.x = 'x', by.y = 'to_rm', all = TRUE)
+all_annotations$Remove_based_on_relatedness_filtering[is.na(all_annotations$Remove_based_on_relatedness_filtering)] <- FALSE
+all_annotations %>% count(Remove_based_on_relatedness_filtering)
+```

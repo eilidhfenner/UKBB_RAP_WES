@@ -1,0 +1,134 @@
+---
+title: "08_sex_inference"
+output: html_document
+---
+# Sex inference
+This script uses outputs from previous scripts in hail to highlight individuals with mismatching imputed sex, phenotypic sex, and y-depth. This script doesn't need much memory, and was run using a mem1_ssd1_v2_x8 instance, taking < 1 hour and costing £0.30
+
+### Load in libraries you need
+```{r}
+install.packages('ukbtools')
+library(ukbtools) 
+library(data.table)
+```
+
+## Imputing sex 
+This stage involves using the output of imputing sex in hail to highlight  participants whose genetic sex doesn't match their reported sex and Y chromosome depth, as this may reflect low quality sequencing data or sample swaps. 
+
+Prior to this stage, high  quality common variants on the X chromosome were selected by filtering variants on call rate (> 0.97) and MAF (> 1%). These high quality, common variants were then used to impute sex within Hail, using the ‘impute_sex’ command. This command calculates the inbreeding co-efficient (f-stat) on the X chromosome. Here, we can read in the f-stat, plot it, and then use it to assign genetic sex: participants with f-stat < 0.6 assigned as female; and those with f-stat > 0.6 assigned as male. 
+
+### Read in data
+```{r}
+library(ggplot2)
+system('dx download ./WES_QC/imputed_sex.tsv')
+system('dx download ./WES_QC/chr_24sample_qc_for_sex_inference.csv')
+system('dx download ./phenotype_cohorts/data_participant.csv')
+imputation=read.table('imputed_sex.tsv', header=T) #The output file from the impute sex command in hail 
+self_reported_sex=read.csv('data_participant.csv') #Self reported sex from UKBB phenotype data
+```
+#### Read in and clean y chromosome QC data 
+```{r}
+y_QC=read.csv('chr_24sample_qc_for_sex_inference.csv', header=F) # QC data for the y chromosome 
+#Tidy up this file
+s=y_QC
+chr_number='y'
+# Remove row 1
+s <- s[-1,]
+# Select columns
+s <- s %>% select(V1, V2, V6, V10, V25:V27)
+# Reformat columns
+s$V1 <- sub("^.*:", "", s$V1, perl = TRUE)
+s$V2 <- sub("^.*:", "", s$V2, perl = TRUE)
+s$V6 <- sub("^.*:", "", s$V6, perl = TRUE)
+s$V10 <- sub("^.*:", "", s$V10, perl = TRUE)
+s$V25 <- sub("^.*:", "", s$V25, perl = TRUE)
+s$V26 <- sub("^.*:", "", s$V26, perl = TRUE)
+s$V27 <- sub("^.*:", "", s$V27, perl = TRUE)
+s$V27 <- substr(s$V27, 1, nchar(s$V27) - 1)
+# Rename columns
+names(s)[names(s) == "V1"] <- "sample_id"
+names(s)[names(s) == "V2"] <- paste0("Dp_stats_mean_", chr_number)
+names(s)[names(s) == "V6"] <- paste0("GQ_stats_mean_", chr_number)
+names(s)[names(s) == "V10"] <- paste0("Call_rate_", chr_number)
+names(s)[names(s) == "V25"] <- paste0("Ti_Tv_", chr_number)
+names(s)[names(s) == "V26"] <- paste0("Het_Hom_", chr_number)
+names(s)[names(s) == "V27"] <- paste0("Ins_Del_", chr_number)
+
+```
+
+### Merge data
+```{r}
+s$y_depth<-s$Dp_stats_mean_y
+
+qc_imputation=merge(s, imputation, by.x='sample_id', by.y='s', all = TRUE)
+qc_imputation=merge(qc_imputation, self_reported_sex, by.x = 'sample_id', by.y='eid', all = TRUE)
+qc_imputation$y_depth<-as.numeric(qc_imputation$y_depth)
+```
+### Annotate with T/F for genetic sex for each indicator
+```{r}
+qc_imputation$F_stat_Female[qc_imputation$f_stat <= 0.6] <- TRUE
+qc_imputation$F_stat_Female[qc_imputation$f_stat > 0.6] <- FALSE
+
+qc_imputation$y_dp_Female[qc_imputation$y_depth <= 3] <- TRUE
+qc_imputation$y_dp_Female[qc_imputation$y_depth > 3] <- FALSE
+
+qc_imputation$self_rep_Female[qc_imputation$p31 == "Female"] <- TRUE
+qc_imputation$self_rep_Male[qc_imputation$p31 == "Male"] <- TRUE
+
+qc_imputation$concordant_female[
+    qc_imputation$self_rep_Female == TRUE &
+    qc_imputation$F_stat_Female == TRUE &
+    qc_imputation$y_dp_Female == TRUE] <- TRUE #215,235 participants
+
+qc_imputation$concordant_male[
+    qc_imputation$self_rep_Male == TRUE &
+    qc_imputation$F_stat_Female == FALSE &
+    qc_imputation$y_dp_Female == FALSE] <- TRUE #184,432 participants
+
+qc_imputation$mismatching_sex <- TRUE
+qc_imputation$mismatching_sex[qc_imputation$concordant_female == TRUE] <- FALSE
+qc_imputation$mismatching_sex[qc_imputation$concordant_male == TRUE] <- FALSE
+# 234 mismatched sex to rm 
+
+
+
+```
+
+### Plots of y depth, f stat and self reported sex
+```{r}
+# Plot f stat and check peaks are where you'd expect
+ggplot(qc_imputation, aes(f_stat, colour=p31))+
+  geom_histogram(bins = 40)+
+  geom_vline(xintercept = 0.6, color='red')
+
+# Plot y depth and check peaks are where you'd expect
+ggplot(qc_imputation, aes(y_depth, colour=p31))+
+  geom_histogram(bins = 40)
+## This looks odd so look in more detail at females 
+female=subset(qc_imputation, qc_imputation$p31=='Female')  
+ggplot(female, aes(y_depth, colour=p31))+
+  geom_histogram(bins = 40)
+
+female %>% count(y_depth)
+
+ggplot(qc_imputation, aes(x = y_depth, y = f_stat, color = p31)) +
+  geom_point(alpha=0.05) +
+  labs(x = 'Y Chromosome Depth', y = 'f-stat', title = 'f-stat from Sex Imputation vs. Y Chromosome Depth') +
+  theme_minimal() +
+  theme(legend.title = element_blank())
+
+```
+
+### Write out concordant and discordant IDs 
+```{r}
+discordant_ids=subset(qc_imputation, qc_imputation$mismatching_sex == TRUE)
+a=discordant_ids$sample_id
+write.csv(a, 'discordant_sex_ids.csv')
+system('dx upload discordant_sex_ids.csv ./WES_QC/')
+
+concordant_ids=subset(qc_imputation, qc_imputation$mismatching_sex == FALSE)
+a=concordant_ids$sample_id
+write.csv(a, 'concordant_sex_ids.csv')
+system('dx upload concordant_sex_ids.csv ./WES_QC/')
+```
+

@@ -1,0 +1,1864 @@
+---
+title: "Defining_pop_structure"
+output: html_document
+date: "2024-08-08"
+---
+
+# Ancestry inference
+This script runs in bash and in R to calculate PCs of ancestry, infer genetic ancestry probabilities, and derive ancestry-specific PCs. These are all then used to control for population stratification in downstream regression analyses. These scripts were not run on the RAP, as at this point genotype data relating to our UK Biobank project was stored on Cardiff University servers.  
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Initial data 
+Initial data is in plink format (/gluster/dri02/biobank/bgen/multiancestry_plink_files/) on Hawk, produced by Sophie Legge from the initial UKBB files. Some light touch QC has been run on these files (described in UKBB.cleaning.script.Rmd and ukbb.multiancestry.sh within the aformentioned folder), using PLINK to exclude variants: 
+- HWE < 1x10-6 (using the midp and keep-fewhet options)
+- Imputation quality information score < 0.9
+- SNV call rate < 0.95
+Individuals with SNV missingness > 0.05 were excluded.
+
+# QC 
+Here I apply additional QC filters (based on advice & scripts from Sophie Legge and Sophie Smart) prior to calculating PCs, excluding variants:
+- Within the MHC region
+- With MAF < 0.01 
+- Within long-range high LD regions 
+
+Then select ancestry marker SNPs and write these into a single file for use in later stages... 
+
+```{bash}
+# Load plink module
+module load plink/2.0
+
+DATA_DIR="/scratch/c.c1928239/UKBB_array_data"
+
+# MAF filter (run this per chromosome!)
+## Write out to .bed files so next step can be run in plink1.9 
+for chr in {1..22}; do
+    plink2 --pfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry \
+           --maf 0.01 \
+           --make-bed \
+           --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent
+done
+
+# Rm long range high LD regions and the MHC region
+## https://genome.sph.umich.edu/wiki/Regions_of_high_linkage_disequilibrium_(LD)
+module load plink/1.9
+for chr in {1..22}; do
+    plink --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent \
+           --make-set ${DATA_DIR}/high-ld-GRCh37.hg19.txt \
+           --write-set \
+           --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLD
+done
+
+for chr in {1..22}; do
+    plink --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent \
+           --exclude ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLD.set \
+           --make-bed \
+           --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved
+done
+
+```
+
+# Defining population structure
+Script works from Antonio's pathfinder pipeline (QC5 stage). 
+Note that I'm sure this can be run much more simply (and efficiently!) by sticking within targets. I took this out of targets so I could fully understand what was going on at each stage, and to check I was happy with the processing (given some of it is per chromosome, differing from what the pipeline is built for).
+
+## Installing dependencies: 
+Prep personal R library
+```{bash}
+# Create a personal R library dir
+mkdir -p ~/R/library
+
+# Add this directory to your .Rprofile (and make one if you don't have this file)
+touch ~/.Rprofile
+echo '.libPaths(c("/home/c.c1928239/R/library", .libPaths()[1]))' >> ~/.Rprofile
+```
+Install required packages and dependencies (I did this in an interactive node). 
+
+```{bash}
+module load compiler/gnu/12/1.0 curl/8.8.0
+
+# Dont think this is true?? module load python/3.7.7-intel2020u1 #need this for a required libgfortran lib to work and enable installation of some packages
+module load R/4.4.0 #Recommended version for this pipeline
+
+## Open R and install required packages and dependencies
+R
+```
+
+```{r}
+### R packages
+install.packages(c("rmarkdown", "optparse","targets", "tarchetypes",
+                   "here", "pbapply", "tidyverse", "parallelly", "VGAM",
+                   "AssocTests", "caret", "probably", "tint", "glue",
+                   "colorspace", "scales", "scattermore", "ggpubr"))
+##### There was an error with installing targets and tarchetypes as libgfortran.so.4 couldnt be found (the compiler you load has libgfortran.so.5 but for some reason this couldnt be read?)
+###### To resolve this I copied libgfortran.so.4 (which was in /apps/compilers/gnu/12.1.0/lib64) to a folder within my home dir, and renamed it as libgfortran.so.4, then added the path to this to my LD_LIBRARY_PATH ("export LD_LIBRARY_PATH=/home/path_to_folder_containing_renamed_libgfortran:$LD_LIBRARY_PATH")
+# export LD_LIBRARY_PATH=/home/c.c1928239/:$LD_LIBRARY_PATH
+
+### Slugify (git) 
+install.packages("devtools")
+devtools::install_github("cannin/slugify")
+### Bioconductor packages
+install.packages("BiocManager")
+BiocManager::install(c("BiocParallel", "GWASTools", "GENESIS", 
+                       "SNPRelate", "rtracklayer")) 
+# rtracklayer isnt available for this version of R? Hoping its not needed for this bit I use. 
+
+## Check installed to your personal R library 
+.libPaths() #Should contain your version of /home/user/R/library
+
+```
+
+## Running ancestry inference 
+### Find AIMS
+Unrelated individuals from the 1000 Genomes Phase 3 (Auton et al. 2015; PMID: 26432245) were used to define ancestry informative markers (AIMS). AIMS were defined as LD-independent variants overlapping the input dataset, outside of genomic regions with long-range LD, and with a Wright's FST value above the 97.5th percentile in at least one pairwise population comparison. Only 6 (out of 9) ancestries are available in this reference dataset.
+
+This section reads in reference files from 1000 genomes and your bim files from the QC stage to select AIMS. The first section of this process is extracting FST values, and this is done per choromsome. From here, FST values from each chromosome can all be merged into one file, and the top 2.5% of all FST values can be extracted to produce a list of ancestry informative markers to take to the next stage. 
+
+This script is a version of the QC5-a section of Antonio's pipeline. The find_aims command is a version of the command from an aim_functions.R script within Antonio's pathfinder pipeline ('pathfinder-pipeline-modular/dragondata_scripts/aim_functions.R'), however it's been edited to be run over individual choromosomes, and the section removing regions of LDRD has been removed as this has already been done in the QC stages of this processing. 
+
+Reference data was also available through the linked OneDrive folder from Antonio's pathfinder pipeline (https://cf-my.sharepoint.com/personal/pardinasa_cardiff_ac_uk/_layouts/15/onedrive.aspx?id=%2Fpersonal%2Fpardinasa%5Fcardiff%5Fac%5Fuk%2FDocuments%2FData%2FServers%2FHAWK%2Fgitlab%2Fpathfinder%2Dpipeline%2Dmodular%2Fdragondata%5Fextra%2Fancestry%5Freference&ga=1). 
+
+This section is run in R, and the pipeline recommends using R 4.4, so before running this chunk load in the R module: 
+- module load compiler/gnu/12/1.0 curl/8.8.0 
+- module load R/4.4.0 
+- export LD_LIBRARY_PATH=/home/c.c1928239/:$LD_LIBRARY_PATH
+```{r}
+library(readr)
+library(dplyr)
+library(targets)
+library(tarchetypes)
+library(here)
+library(slugify) # Package by Agustin Luna (https://github.com/cannin)
+library(pbapply)
+library(tidyverse)
+
+setwd('/scratch/c.c1928239/UKBB_array_data/') #Ensure the plink files, _targets.R script, aim_functions.R script, and ancestry reference files are all within this folder.
+
+# Set up command to write out fst values so you can find ancestry-informative markers
+find_aims <- function(bimfile,bimfile.ref,fst.filevector,ncores) {
+  message("Reading pairwise FST values from reference files...")
+  if(ncores>1) {
+    hatchlings <- parallelly::makeClusterPSOCK(opt$ncores, autoStop = TRUE, rscript_startup = quote(local({
+      options(tidyverse.quiet = TRUE)
+      suppressWarnings(library("tidyverse"))})))
+    fst.list <- pblapply(fst.filevector, read_table, col_names=T,col_types = "iicid",
+                         progress = F,show_col_types = F,na = c("NA","nan"), cl=hatchlings)  
+  } else { fst.list <- pblapply(fst.filevector, read_table, col_names=T,col_types = "iicid",
+                                progress = F,show_col_types = F,na = c("NA","nan"))}
+  # Ensure markers from input dataset and reference are in the same strand
+  snp.match.strand <- distinct(rbind(inner_join(select(bimfile,c("SNP","A1","A2")),
+                                                select(bimfile.ref,c("SNP","A1","A2")),
+                                                by=join_by(SNP,A1,A2)),
+                                     inner_join(select(bimfile,c("SNP","A1","A2")),
+                                                select(bimfile.ref,c("SNP","A1","A2")),
+                                                by=join_by(SNP,A1==A2,A2==A1))),
+                               SNP, .keep_all=T) %>%
+    subset(SNP != ".") # Remove any SNP with no name
+  message("Extracting all FST values from reference dataset...")
+  fst.all <- pblapply(fst.list, function(x) {
+     # Select SNPs in common between reference and test dataset
+    # Make sure selected SNPs will not be dropped because of strand issues
+    x.trim <- subset(x, ID %in% snp.match.strand$SNP)
+    # P-value type scaling for clumping (not a real p-value)
+    x.trim$HUDSON_FST_P <- 10^(VGAM::logclink(x.trim$HUDSON_FST))
+    return(subset(x.trim, select = c("ID", "HUDSON_FST", "HUDSON_FST_P")))
+  })
+  fst.all <- as_tibble(bind_rows(fst.all))
+  message("Processed all FST values.")
+  return(fst.all)
+}
+
+
+# Prep inputs for find_aims
+bim_ref=read_table('/scratch/c.c1928239/UKBB_array_data/ancestry_reference/1kgp/kgp3.array_snps.pvar', 
+                   col_names=c("CHR", "BP", "SNP", "A1", "A2", "cm"), col_types="iicccd", skip=1)
+fam_ref=read_table('/scratch/c.c1928239/UKBB_array_data/ancestry_reference/1kgp/kgp3.array_snps.psam', 
+                   col_names=c("FID", "IID", "Sex", "Pheno"), col_types="ccii", skip=1)
+pheno_ref=read_table('/scratch/c.c1928239/UKBB_array_data/ancestry_reference/1kgp/kgp3.array_snps.norel.pheno',
+                     col_names=T, col_types="ccc")
+# Use Sys.glob to return a list of files
+qc5_ref_fst <- Sys.glob('/scratch/c.c1928239/UKBB_array_data/ancestry_reference/1kgp/kgp3.array_snps.*.fst.var.gz')
+chromosomes<-1:22
+
+for (chromosome in chromosomes) {
+    bim_file_path <- paste0('/scratch/c.c1928239/UKBB_array_data/ukb_imp_chr', chromosome, '_multiancestry_MAFover1percent_highLDremoved.bim')
+    # Read in BIM file
+    bim_file <- read_table(bim_file_path, 
+                           col_names = c("CHR", "SNP", "cm", "BP", "A1", "A2"), 
+                           col_types = "iciccc",
+                           skip = 0)
+    # Change column order to match expected (and ref) input 
+    bim_file <- bim_file[, c("CHR", "BP", "SNP", "A1", "A2", "cm")]
+    # Run find_aims
+    fst_values <- find_aims(bim_file, bim_ref, qc5_ref_fst, 1)
+    # Save the results
+    output_path <- paste0('/scratch/c.c1928239/UKBB_array_data/fst_values_chr_', chromosome, '.csv')
+    write_csv(fst_values, output_path)
+}
+
+# Make a list of all saved FST .csv files (one per chromosome)
+fst_files <- list.files('/scratch/c.c1928239/UKBB_array_data/', pattern = "fst_values_chr_.*\\.csv", full.names = TRUE)
+# combine them all
+all_fst_values <- bind_rows(lapply(fst_files, read_csv)) # Each chr is millions of FST values so note that this file will be very big 
+# Calculate the top 2.5% FST threshold
+fst_top_threshold <- quantile(all_fst_values$HUDSON_FST, 0.975, type = 8, na.rm = TRUE)
+# Select AIMs (SNPS with top 2.5% FST values)
+aims_final <- filter(all_fst_values, HUDSON_FST >= fst_top_threshold) %>%
+  arrange(desc(HUDSON_FST_P)) %>%
+  distinct(ID, .keep_all = TRUE)
+# Save the aims from all chr
+write_table(aims_final, '/scratch/c.c1928239/UKBB_array_data/all_chromosomes.aims')
+```
+
+#### Filter to independent AIMS using plink 
+This section uses plink to clump AIMs. 
+
+This requires plink2, but you can't use the module version of it no hawk as it is missing some commands (possibly an older version?). Get plink from the onedrive available via the pathfinder git (https://cf-my.sharepoint.com/personal/pardinasa_cardiff_ac_uk/_layouts/15/onedrive.aspx?id=%2Fpersonal%2Fpardinasa%5Fcardiff%5Fac%5Fuk%2FDocuments%2FData%2FServers%2FHAWK%2Fgitlab%2Fpathfinder%2Dpipeline%2Dmodular%2Fdragondata%5Fextra&ga=1), and direct to this copy of plink2 for this stage. 
+
+```{bash}
+# Prep your version of plink2 (from the onedrive folder)to be accessible 
+chmod +x /scratch/c.c1928239/UKBB_array_data/plink_prog/plink2
+
+# Prep your aims file ads a space-delimited file 
+sed 's/,/ /g' /scratch/c.c1928239/UKBB_array_data/all_chromosomes.aims > /scratch/c.c1928239/UKBB_array_data/all_chromosomes.aims_space_delimited
+
+# Clumping
+/scratch/c.c1928239/UKBB_array_data/plink_prog/plink2 \
+       --pgen /scratch/c.c1928239/UKBB_array_data/ancestry_reference/1kgp/kgp3.array_snps.pgen \
+       --pvar /scratch/c.c1928239/UKBB_array_data/ancestry_reference/1kgp/kgp3.array_snps.pvar \
+       --psam /scratch/c.c1928239/UKBB_array_data/ancestry_reference/1kgp/kgp3.array_snps.psam \
+       --keep /scratch/c.c1928239/UKBB_array_data/ancestry_reference/1kgp/kgp3.array_snps.balanced.ids \
+       --clump cols=-total,-bins /scratch/c.c1928239/UKBB_array_data/all_chromosomes.aims_space_delimited \
+       --clump-snp-field ID \
+       --clump-field HUDSON_FST_P \
+       --clump-kb 500 \
+       --clump-r2 0.2 \
+       --clump-p1 1 \
+       --clump-p2 1 \
+       --out /scratch/c.c1928239/UKBB_array_data/allchromosomes.AIM.r02
+
+# For my UKBB files this wrote 57126 clumps from 394486 index candidates.  
+```
+
+
+### Extract AIMS 
+This section extracts AIMS written out in the last stage from the reference and input sample using plink and is a version of section QC5-b from the _targets.R script of Antonio's pipeline. 
+
+#### Reference sample 
+First extract aims from the reference sample: 
+```{bash}
+# Run PLINK2 for reference extraction
+/scratch/c.c1928239/UKBB_array_data/plink_prog/plink2 \
+  --pgen /scratch/c.c1928239/UKBB_array_data/ancestry_reference/1kgp/kgp3.array_snps.pgen \
+  --pvar /scratch/c.c1928239/UKBB_array_data/ancestry_reference/1kgp/kgp3.array_snps.pvar \
+  --psam /scratch/c.c1928239/UKBB_array_data/ancestry_reference/1kgp/kgp3.array_snps.psam \
+  --keep /scratch/c.c1928239/UKBB_array_data/ancestry_reference/1kgp/kgp3.array_snps.norel.ids \
+  --extract /scratch/c.c1928239/UKBB_array_data/allchromosomes.AIM.r02.clumps \
+  --set-missing-var-ids '@:#:$r:$a' \
+  --make-bed \
+  --out /scratch/c.c1928239/UKBB_array_data/ref.AIM.r02.extract
+```
+
+#### Input sample 
+Next extract aims from your UKBB sample, again this is done per chromosome given that the initial plink files are per chromosome. 
+```{bash}
+# Use plink2 for this
+for chr in {1..22}; do
+    /scratch/c.c1928239/UKBB_array_data/plink_prog/plink2 \
+        --bed /scratch/c.c1928239/UKBB_array_data/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved.bed \
+        --bim /scratch/c.c1928239/UKBB_array_data/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved.bim \
+        --fam /scratch/c.c1928239/UKBB_array_data/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved.fam \
+        --extract /scratch/c.c1928239/UKBB_array_data/allchromosomes.AIM.r02.clumps \
+        --set-missing-var-ids '@:#:$r:$a' \
+        --make-bed \
+        --out /scratch/c.c1928239/UKBB_array_data/chr${chr}.AIM.r02.extract
+done
+```
+
+### Merge reference and input sample 
+This is a version of QC5-c from Antonio's pathfinder pipeline. Here, we need to merge the input data from across all chromosomes, and then merge this with the reference data. Note that merging uses plink1! 
+
+#### Merge input data across all chromosomes
+```{bash}
+# Make a list of all files (bar chr1) that need to be merged
+for chr in {2..22}; do
+    echo "/scratch/c.c1928239/UKBB_array_data/chr${chr}.AIM.r02.extract" >> merge_list.txt
+done
+
+# Load the plink1 module 
+module load plink/1.9
+
+# Merge all chromosomes using plink
+plink --bfile /scratch/c.c1928239/UKBB_array_data/chr1.AIM.r02.extract \
+      --merge-list merge_list.txt \
+      --make-bed \
+      --out /scratch/c.c1928239/UKBB_array_data/merged_chromosomes.AIM.r02.extract
+```
+Here, check in the plink output that the number of people and total number of variants being merged is correct!
+
+#### Merge input and reference data 
+```{bash}
+plink --bfile /scratch/c.c1928239/UKBB_array_data/merged_chromosomes.AIM.r02.extract \
+      --bmerge /scratch/c.c1928239/UKBB_array_data/ref.AIM.r02.extract \
+      --indiv-sort 0 \
+      --make-bed \
+      --out merged_AIMS_UKBB_array_1KGP_ref
+```
+Again, check the plink output here to ensure the number of samples is correct (for each dataset and for the merged dataset), and the variants match up from each dataset.
+
+### Fit LDA model 
+This is a version of section QC5d from Antonio's pathfinder pipeline. 
+
+This section runs in R, so before running this chunk load in the R module: 
+- module load compiler/gnu/12/1.0 curl/8.8.0 
+- module load R/4.4.0 
+- export LD_LIBRARY_PATH=/home/c.c1928239/:$LD_LIBRARY_PATH
+
+#### Convert to gds
+```{r}
+library('SNPRelate')
+
+snpgdsBED2GDS(bed.fn="/scratch/c.c1928239/UKBB_array_data/merged_AIMS_UKBB_array_1KGP_ref.bed", 
+              bim.fn="/scratch/c.c1928239/UKBB_array_data/merged_AIMS_UKBB_array_1KGP_ref.bim",
+              fam.fn="/scratch/c.c1928239/UKBB_array_data/merged_AIMS_UKBB_array_1KGP_ref.fam",
+              out.gdsfn="/scratch/c.c1928239/UKBB_array_data/merged_AIMS_UKBB_array_1KGP_ref.gds")
+```
+Check your number of SNPs and number of samples are as you'd expect. 
+
+#### Project input sample into reference eigenvector space 
+This section projects genetic data of each sample into the reference PCA space using pcair. 
+
+Note that this function is from the aim_functions.R script within Antonio's pathfinder pipeline ('pathfinder-pipeline-modular/dragondata_scripts/aim_functions.R'). In this pipeline the finction reads a .fam file from QC2 stage (from input data). Our input data is per chromosome, but all fam files should be the same, so the fam file from chr 1 is used here. 
+```{r}
+# Load in required packages
+library('GWASTools')
+library('GENESIS')
+
+# Prep function 
+pcair_project_from_gds <- function(gdsfile,famfile.input,ncores) {
+  genodata <- GdsGenotypeReader(gdsfile)
+  genodata <- GenotypeData(genodata)
+  genodata.ids <- getScanID(genodata)
+  # Select the reference ids (as the last section of the input gds file)
+  ref.ids <- tail(genodata.ids,-nrow(famfile.input))
+  #message("First reference sample identified as ",head(ref.ids,1),". Last reference sample identified as ",tail(ref.ids,1))
+  message("Projecting input genotypes into reference PCA space...")
+  rpcdata <- pcair(genodata,unrel.set=ref.ids, 
+                   num.cores=ncores, eigen.cnt=100,
+                   algorithm=if(nscan(genodata)>=10000){"randomized"} else {"exact"})
+  close(genodata)
+  return(rpcdata)
+}
+
+# Prep input data
+gds_file<-"/scratch/c.c1928239/UKBB_array_data/merged_AIMS_UKBB_array_1KGP_ref.gds"
+fam_file <- read_table("/scratch/c.c1928239/UKBB_array_data/ukb_imp_chr1_multiancestry_MAFover1percent_highLDremoved.fam", 
+                       col_names = c("FID", "IID", "father", "mother", "Sex", "Pheno"),
+                       col_types = "cciiii")
+
+# Run projection
+pcair_projected <- pcair_project_from_gds(gds_file, fam_file, 1)
+
+# Save the full pcair_projected object as an RDS file
+saveRDS(pcair_projected, file = "/scratch/c.c1928239/UKBB_array_data/pcair_projected_full.rds")
+
+# Load the pcair_projected object back into R to check it's saved correctly
+pcair_projected <- readRDS("/scratch/c.c1928239/UKBB_array_data/pcair_projected_full.rds")
+```
+Check the output here. It should list the total n samples, the 'unrelated set' which is your ref files, whom the PC space is derived from, and the 'related set' which is your input file, who are projected in to the reference PCA space. I used only 1 core here (100G memory), and this section took a few hours. 
+
+#### Tracy Widom test 
+The Tracy Widom test (Patterson et al. 2006; PMID: 17194218) is used in this stage to compute significant eigenvalues from the PCA results from the previous step and selects the number of eigenvectors of the dataset to use for the ancestry inference procedure. 
+```{r}
+library(AssocTests)
+pcair_projected <- readRDS("/scratch/c.c1928239/UKBB_array_data/pcair_projected_full.rds")
+
+sig_eigenvalues<- tw(pcair_projected$values,100, criticalpoint = 0.9793)$SigntEigenL
+
+# Save the value using saveRDS
+saveRDS(sig_eigenvalues, file = "/scratch/c.c1928239/UKBB_array_data/pcair_sig_eigenvalues.rds")
+
+```
+
+#### Train a linear discriminant analysis (LDA) model on reference data
+In this stage, a model based on Fisher's Linear Discriminant Analysis (Yang et al. 2005; PMID: 16193326) is trained on the known ancestries of the reference samples with principal components as predictors.
+
+Note that this function is from the aim_functions.R script within Antonio's pathfinder pipeline ('pathfinder-pipeline-modular/dragondata_scripts/aim_functions.R').
+```{r}
+library(caret)
+
+## Prep function 
+lda_train <- function(qc5.pcair,qc5.tw,qc5.ref.bfile) {
+  # Create PCA data frame
+  qc5.pca <- as.data.frame(qc5.pcair$vectors)
+  colnames(qc5.pca) <- paste0("PC",1:100)
+  qc5.pca$IID <- row.names(qc5.pca)
+  qc5.pca <- subset(qc5.pca,select=c("IID",paste0("PC",1:100))) %>%
+    arrange(IID) %>%
+    mutate(ref=ifelse(IID%in%qc5.pcair$unrels,T,F))
+  qc5.ref.ancestry <- qc5.ref.bfile[["pheno"]] %>%
+    mutate(IID2=paste(FID,IID,sep="-")) %>%
+    arrange(IID2)
+  # Train and tune
+  lda.train.data <- as.data.frame(subset(qc5.pca,ref==T,select=paste0("PC",1:qc5.tw)))
+  lda.train.class <- as.character(qc5.ref.ancestry$biogeographic_group)
+  message("Training Linear Discriminant Analysis (LDA) model for ancestry inference...")
+  lda.train <- train(x=lda.train.data,y=lda.train.class, 
+                     method="lda", 
+                     metric="Accuracy", 
+                     trControl=trainControl(method="repeatedcv", number=10, repeats=5, classProbs = T, savePredictions = "final"))
+  return(lda.train)}
+
+# Read in reference dataset
+bim_ref=read_table('/scratch/c.c1928239/UKBB_array_data/ancestry_reference/1kgp/kgp3.array_snps.pvar', 
+                   col_names=c("CHR", "BP", "SNP", "A1", "A2", "cm"), 
+                   col_types="iicccd", 
+                   skip=1)
+fam_ref=read_table('/scratch/c.c1928239/UKBB_array_data/ancestry_reference/1kgp/kgp3.array_snps.psam', 
+                   col_names=c("FID", "IID", "Sex", "Pheno"), 
+                   col_types="ccii", 
+                   skip=1)
+pheno_ref=read_table('/scratch/c.c1928239/UKBB_array_data/ancestry_reference/1kgp/kgp3.array_snps.norel.pheno', 
+                     col_names=T, 
+                     col_types="ccc")
+ref_bfile <- list(bim = bim_ref, 
+                  fam = fam_ref, 
+                  pheno = pheno_ref)
+
+# Run
+lda_trained<-lda_train(pcair_projected, significant_eigenvalues, ref_bfile)
+
+# Save output
+saveRDS(lda_trained, file = "/scratch/c.c1928239/UKBB_array_data/lda_trained_on_ref.rds")
+```
+
+#### Select best probability threshold for ancestry inference
+This stage uses Youden's J index (Perkins & Schisterman 2006; PMID: 16410346). to find the best threshold for ancestry inference. This is set by finding, for each ancestral category, the probability cutoff maximising the value of Youden's J index.
+
+Note that this function is from the aim_functions.R script within Antonio's pathfinder pipeline ('pathfinder-pipeline-modular/dragondata_scripts/aim_functions.R'). 
+```{r}
+library(probably)
+
+# Set up function
+lda_best_threshold <- function(lda_train) {
+  pops <- data.frame(biogeographic_group=unique(lda_train$pred$obs),threshold=NA)
+  message("Finding optimal probability threshold for assigning discrete ancestry categories...")
+  for (ancestry in pops$biogeographic_group) {
+    lda.train.ancestry <- subset(lda_train$pred,select=c("pred","obs",ancestry))
+    colnames(lda.train.ancestry) <- c("pred","obs","prob")
+    lda.train.ancestry <- mutate(lda.train.ancestry,
+                                 pred=ifelse(pred==ancestry,ancestry,"OTHER"),
+                                 pred=factor(pred,levels=c(ancestry,"OTHER")),
+                                 obs=ifelse(obs==ancestry,ancestry,"OTHER"),
+                                 obs=factor(obs,levels=c(ancestry,"OTHER")))
+    # Find best threshold from 0.5 to 1
+    lda.train.performance <- threshold_perf(lda.train.ancestry, obs, prob, thresholds = seq(0.5, 1, by = 0.01))
+    lda.train.performance <- subset(lda.train.performance,.metric=="j_index")
+    lda.train.threshold <- unlist(subset(lda.train.performance,.estimate==max(.estimate),select=".threshold"),use.names = F)
+    lda.train.threshold <- min(lda.train.threshold)
+    # Repeat to refine
+    lda.train.performance <- threshold_perf(lda.train.ancestry, obs, prob, thresholds = seq(max(0.501,lda.train.threshold-0.01), min(lda.train.threshold+0.01,1), by = 0.001))
+    lda.train.performance <- subset(lda.train.performance,.metric=="j_index")
+    lda.train.threshold <- unlist(subset(lda.train.performance,.estimate==max(.estimate),select=".threshold"),use.names = F)
+    lda.train.threshold <- min(lda.train.threshold)
+    # Assign threshold
+    pops$threshold[pops$biogeographic_group == ancestry] <- lda.train.threshold
+    rm(lda.train.ancestry,lda.train.performance,lda.train.threshold)}
+  return(pops)}
+
+# Run 
+best_threshold<-lda_best_threshold(lda_trained)
+
+
+# Save output
+saveRDS(best_threshold, '/scratch/c.c1928239/UKBB_array_data/best_threshold.rds')
+```
+
+  
+#### Apply linear discriminant analysis model to input data
+In this stage, the trained LDA classification model is applied to the principal components of the input dataset to predict the most likely ancestral category of each sample. A threshold for ancestry inference was set above, and this is used here. To avoid assigning any individual to multiple ancestries, only probability cutoffs greater than 0.501 were evaluated.
+
+Note that this function is from the aim_functions.R script within Antonio's pathfinder pipeline ('pathfinder-pipeline-modular/dragondata_scripts/aim_functions.R'). 
+```{r}
+lda_test <- function(famfile,qc5.pcair,qc5.tw,qc5.train,qc5.youden) {
+  # Create PCA data frame
+  qc5.pca <- as.data.frame(qc5.pcair$vectors)
+  colnames(qc5.pca) <- paste0("PC",1:100)
+  qc5.pca$IID <- row.names(qc5.pca)
+  qc5.pca <- subset(qc5.pca,select=c("IID",paste0("PC",1:100))) %>%
+    arrange(IID) %>%
+    mutate(ref=ifelse(IID%in%qc5.pcair$unrels,T,F))
+  # Rearrange FAM file
+  if (max(famfile$IID %in% qc5.pca$IID)==1) {
+    fam <- mutate(famfile, IID2=IID) %>%
+      select(c("FID","IID","IID2"))
+  } else {
+    fam <- mutate(famfile, IID2=paste(FID,IID,sep="-")) %>%
+      select(c("FID","IID","IID2"))
+  }
+  # Predict ancestries
+  lda.test.data <- as.data.frame(subset(qc5.pca,ref==F,select=paste0("PC",1:qc5.tw)))
+  row.names(lda.test.data) <- unlist(subset(qc5.pca,ref==F,select="IID"),use.names = F)
+  message("Applying LDA model to input genotype data...")
+  lda.test <- predict(object=qc5.train,newdata=lda.test.data,type="prob")
+  lda.test <- round(lda.test,3) # Restrict output to three decimal places
+  lda.test$IID2 <- rownames(lda.test)
+  lda.test <- right_join(fam,lda.test,by="IID2")
+  lda.test$biogeographic_prediction <- "UNK"
+  for (i in 1:nrow(qc5.youden)) {
+    bga <- as.character(qc5.youden$biogeographic_group[i])
+    lda.test$biogeographic_prediction[lda.test[bga]>=qc5.youden$threshold[i]] <- bga
+  }
+  lda.test <- mutate(lda.test, 
+                     biogeographic_prediction=factor(biogeographic_prediction,
+                                                     labels=c("Unclassified","African American / Afro-Caribbean","American","East Asian","European","Latino","Near Eastern / North African","Oceanian","Central / South Asian","Sub-Saharan African"),
+                                                     levels=c("UNK","AAC","AME","EAS","EUR","LAT","NEA","OCE","SAS","SSA")))
+  return(lda.test)}
+
+# Read in fam file from input data to get original ids
+fam_file <- read_table("/scratch/c.c1928239/UKBB_array_data/ukb_imp_chr1_multiancestry_MAFover1percent_highLDremoved.fam", 
+                       col_names = c("FID", "IID", "father", "mother", "Sex", "Pheno"),
+                       col_types = "cciiii")
+
+# Run
+lda_test_results <- lda_test(fam_file, 
+                             pcair_projected, 
+                             significant_eigenvalues, 
+                             lda_trained, 
+                             best_threshold)
+
+# Save output
+saveRDS(lda_test_results, '/scratch/c.c1928239/UKBB_array_data/lda_applied_to_input.rds')
+```
+
+### Outputs
+#### Plot PCs
+##### Prep data for plotting
+```{r}
+library(ggplot2)
+library(dplyr)
+library(readr)
+library(forcats)
+library(scattermore)
+library(ggpubr)
+
+# Read in files required here
+qc5.pcair <- readRDS("/scratch/c.c1928239/UKBB_array_data/pcair_projected_full.rds")
+qc5.tw<- readRDS("/scratch/c.c1928239/UKBB_array_data/pcair_sig_eigenvalues.rds")
+
+# Sort data and ids 
+qc5.pca <- as.data.frame(qc5.pcair$vectors)
+colnames(qc5.pca) <- paste0("PC",1:100)
+qc5.pca$IID <- row.names(qc5.pca)
+qc5.pca <- subset(qc5.pca,select=c("IID",paste0("PC",1:qc5.tw))) %>%
+           arrange(IID) %>%
+           mutate(ref=ifelse(IID%in%qc5.pcair$unrels,T,F))
+# Check n ids in ref and input data is correct
+qc5.pca %>% count(ref)
+
+# Add ancestries
+## NOTE: I don't like this code but the GDS conversion can change IDs in unpredictable ways (depending on whether FIDs and IIDs are unique) which makes a join-based solution unreliable. It should (!) work as the sorting ensures an identical order of samples.
+qc5.ref.ancestry <- read_table("/scratch/c.c1928239/UKBB_array_data/ancestry_reference/1kgp/kgp3.array_snps.norel.pheno", col_names=TRUE, col_types="ccc")
+
+## In the following conditional statement, "1" indicates that there were matches between the unaltered genotype IIDs and the GDS IDs. If so, the variable IID2 is still created for compatibility with downstream code, though just as a copy of IID.
+if (max(qc5.ref.ancestry$IID %in% qc5.pca$IID)==1) {
+    qc5.ref.ancestry <- mutate(qc5.ref.ancestry, IID2=IID) %>%
+                        arrange(IID2)
+## If not, then IID2 is created by merging FID and IID with the separator used by GDS.
+    } else {
+    qc5.ref.ancestry <- mutate(qc5.ref.ancestry, IID2=paste(FID,IID,sep="-")) %>%
+                        arrange(IID2)
+    }
+
+qc5.pca$bga <- 'UKBB_array'
+qc5.pca$bga[qc5.pca$ref==T] <- qc5.ref.ancestry$biogeographic_group
+
+# Create palette and factor definitions
+huddart2018.levels <- c("AAC","AME","EAS","EUR","LAT","NEA","OCE","SAS","SSA","UKBB_array")
+huddart2018.insample <- huddart2018.levels[huddart2018.levels %in% unique(qc5.pca$bga)]
+
+huddart2018.palette <- c("#f6b068","#dffb94","#ffe286","#3cc9a7","#5a4cae","#9ce4a4","#1185c2","#ff592d","#e50043","grey")
+huddart2018.palette <- setNames(huddart2018.palette,c("AAC","AME","EAS","EUR","LAT","NEA","OCE","SAS","SSA",'UKBB_array'))
+huddart2018.palette.insample <- huddart2018.palette[huddart2018.insample]
+
+huddart2018.labels <- c("African American / Afro-Caribbean","American","East Asian","European","Latino","Near Eastern / North African","Oceanian","South Asian","Sub-Saharan African",'UKBB_array')
+huddart2018.labels <- setNames(huddart2018.labels,c("AAC","AME","EAS","EUR","LAT","NEA","OCE","SAS","SSA",'UKBB_array'))
+huddart2018.labels.insample <- huddart2018.labels[huddart2018.insample]
+
+# Reorder data frame for plotting and labelling
+qc5.pca <- qc5.pca %>%
+           mutate(bga = factor(bga,levels=huddart2018.insample),
+                  bga = fct_infreq(bga)) %>% # Reorder by group size
+           arrange(bga,IID) %>% # Arrange for plotting order
+           mutate(bga = fct_relevel(bga,huddart2018.insample)) # Relevel for legend order
+```
+
+##### Plot 
+Given how many individuals are in the UKBB dataset, I edited how these plots are formed as you couldn't see the reference samples. 
+```{r}
+qc5.rpcdata.p1 <- ggplot(subset(qc5.pca), aes(x = PC1, y= PC2, colour=bga,fill=bga)) +
+                    geom_point(data=subset(qc5.pca,ref==F),shape=22, alpha = 0.0005, size = 0.5,  colour="gray",show.legend = FALSE) +
+                    geom_scattermore(alpha = 0.1, pointsize = 6) +
+                    scale_colour_manual(values=huddart2018.palette.insample,
+                                        labels=huddart2018.labels.insample,
+                                        aesthetics = c("colour", "fill"),
+                                        drop=T) +
+                    labs(title="Biogeographic Ancestry PC-AiR",y="PC2",x="PC1",color="",fill="") +
+                    guides(colour = guide_legend(override.aes = list(alpha=1,size=5),nrow=2,byrow=TRUE)) +
+                    theme(axis.title=element_text(),
+                          axis.text=element_blank(),
+                          axis.ticks=element_blank(), 
+                          legend.position="bottom",
+                          legend.direction = "horizontal")
+
+qc5.rpcdata.p2 <- ggplot(subset(qc5.pca), aes(x = PC3, y= PC4, colour=bga,fill=bga)) +
+                        geom_point(data=subset(qc5.pca,ref==F),shape=22, alpha = 0.0005,size = 0.5,  colour="gray",show.legend = FALSE) +
+                        geom_scattermore(alpha = 0.1, pointsize = 6) +
+                        scale_colour_manual(values=huddart2018.palette.insample,
+                                            labels=huddart2018.labels.insample,
+                                            aesthetics = c("colour", "fill"),
+                                            drop=T) +
+                        labs(title=" ",y="PC4",x="PC3",color="",fill="") +
+                        guides(colour = guide_legend(override.aes = list(alpha=1,size=5),nrow=2,byrow=TRUE)) +
+                        theme(axis.title=element_text(),
+                              axis.text=element_blank(),
+                              axis.ticks=element_blank(), 
+                              legend.position="bottom",
+                              legend.direction = "horizontal")
+
+combined_plot<- ggarrange(qc5.rpcdata.p1, qc5.rpcdata.p2,ncol=2,nrow=1,
+          common.legend = TRUE, legend="bottom") 
+
+# Save the plot
+ggsave("/scratch/c.c1928239/UKBB_array_data/PCair_plot.png", plot = combined_plot, width = 12, height = 6, dpi = 400)
+```
+
+#### LDA model 
+##### Write out training statistics
+```{r}
+library(caret)
+library(knitr)
+
+qc5.train<-readRDS("/scratch/c.c1928239/UKBB_array_data/lda_trained_on_ref.rds")
+qc5.youden<-readRDS('/scratch/c.c1928239/UKBB_array_data/best_threshold.rds')
+qc5.test<-readRDS('/scratch/c.c1928239/UKBB_array_data/lda_applied_to_input.rds')
+
+
+# Output training statistics of LDA model
+qc5.train.cm <- confusionMatrix(qc5.train$pred$obs,qc5.train$pred$pred,mode = "everything")
+qc5.train.cm <- qc5.train.cm$byClass[,c("Prevalence","Sensitivity","Specificity","Pos Pred Value","Neg Pred Value","F1","Balanced Accuracy")]
+rownames(qc5.train.cm) <- gsub("Class: ", "", rownames(qc5.train.cm)) # Remove the string "Class:"
+# Cleanup confusion matrix
+qc5.train.cm <- as.data.frame(qc5.train.cm) %>%
+                setNames(c("prev","sens","spec","ppv","npv","f1","acc")) %>%
+                mutate(across(everything(),scales::percent_format(accuracy=0.01))) %>%
+                mutate(bga = factor(row.names(.),
+                                    labels=c("African American / Afro-Caribbean","American","East Asian","European","Latino","Near Eastern / North African","Oceanian","Central / South Asian","Sub-Saharan African"),                                    levels=c("AAC","AME","EAS","EUR","LAT","NEA","OCE","SAS","SSA"))) %>%
+                select(c("bga","prev","sens","spec","acc"))
+
+# Write table using kable
+kable(qc5.train.cm,
+      row.names=F,
+      col.names=c("Biogeographic Ancestry","Prevalence","Sensitivity","Specificity","Balanced Accuracy"),
+      caption="LDA model training statistics, based on 5 repeats of a 10-fold cross-validation routine.",
+      longtable=F)
+
+# Write table to save out 
+colnames(qc5.train.cm) <- c("Biogeographic Ancestry", "Prevalence", "Sensitivity", "Specificity", "Balanced Accuracy")
+write.table(qc5.train.cm, file = "/scratch/c.c1928239/UKBB_array_data/LDA_training_model_stats.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+
+
+qc5.na <- subset(qc5.test,biogeographic_prediction=="Unclassified")
+qc5.export <- left_join(qc5.test,
+                        select(qc5.pca,c("IID",paste0("PC",1:qc5.tw))),
+                        by=c("IID2"="IID")) %>%
+              mutate(IID2=NULL)
+write.csv(qc5.export, "/scratch/c.c1928239/UKBB_array_data/full_dataset_inferred_ancestries.csv", col.names=T, row.names=F, quote=F)
+```
+
+
+##### Write out results
+```{r}
+# Reformat ancestral categories on the optimal threshold data frame
+qc5.youden <- qc5.youden %>%
+              mutate(biogeographic_group=factor(biogeographic_group,
+                                                labels=c("Unclassified","African American / Afro-Caribbean","American","East Asian","European","Latino","Near Eastern / North African","Oceanian","Central / South Asian","Sub-Saharan African"),                       levels=c("UNK","AAC","AME","EAS","EUR","LAT","NEA","OCE","SAS","SSA")))
+# Make a summary table
+qc5.test.table <- as.data.frame(table(qc5.test$biogeographic_prediction)) %>%
+                  full_join(qc5.youden,by=c("Var1"="biogeographic_group")) %>%
+  select(c("Var1","threshold","Freq")) %>%
+  subset(!(is.na(threshold)&Freq==0))
+# Output in kable
+kable(qc5.test.table,
+      col.names=c("Predicted Biogeographic Ancestry","Probability Threshold","Number of Samples"),
+      caption="LDA model results.",
+      row.names=F,
+      longtable=F)
+
+# Write table to save out 
+colnames(qc5.test.table) <- c("Predicted Biogeographic Ancestry","Probability Threshold","Number of Samples")
+write.csv(qc5.test.table, file = "/scratch/c.c1928239/UKBB_array_data/LDA_model_results.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+```
+
+#### Testing
+Plot PCs in just UKBB samples coloured by predicted ancestries
+```{r}
+# If rereading in: qc5.export<-read_csv('~/Downloads/full_dataset_inferred_ancestries.csv')
+tiff("~/Downloads/biogeographic_prediction_PC1_2.tiff", units="in", width=15, height=10, res=400)
+ggplot(qc5.export, aes(PC1, PC2, group=biogeographic_prediction, colour=biogeographic_prediction)) +
+  geom_scattermore(alpha = 0.02, pointsize = 6) +  # Adjust transparency and size to avoid overcrowding
+  labs(title="Biogeographic prediction", y="PC2", x="PC1", color="", fill="")+
+  guides(colour = guide_legend(override.aes = list(alpha=1,size=5),nrow=7,byrow=TRUE))+
+  theme(plot.title = element_text(size=20),
+        axis.title = element_text(size=16), 
+        axis.text = element_text(size=14),
+        legend.title = element_text(size=16), 
+        legend.text = element_text(size=14))
+dev.off()
+
+tiff("~/Downloads/biogeographic_prediction_PC3_4.tiff", units="in", width=15, height=10, res=400)
+ggplot(qc5.export, aes(PC3, PC4, group=biogeographic_prediction, colour=biogeographic_prediction)) +
+  geom_scattermore(alpha = 0.02, pointsize = 6) +  # Adjust transparency and size to avoid overcrowding
+  labs(title="Biogeographic prediction", y="PC4", x="PC3", color="", fill="")+
+  guides(colour = guide_legend(override.aes = list(alpha=1,size=5),nrow=7,byrow=TRUE))+
+  theme(plot.title = element_text(size=20),
+        axis.title = element_text(size=16), 
+        axis.text = element_text(size=14),
+        legend.title = element_text(size=16), 
+        legend.text = element_text(size=14))
+dev.off()
+
+```
+
+Merge with self reported ethnicity and look at correlations
+```{r}
+self_rep_ethnicity<-read.csv('~/Downloads/participant_ethnicities.csv') # Has ids from 13310
+link<-read.table('~/Downloads/link_AD.app15175_George.app14421_Xav.app17044_JW.app13310.txt', header=T)
+
+ancs=merge(link, self_rep_ethnicity, by.x='eid_13310', by.y='eid')
+ancs=merge(ancs, qc5.export, by.x='app15175', by.y='IID') # 487,033 (and this is the AD one so most likely right?)
+
+```
+
+##### Filter to each biogeographical ancestry and see counts of self report
+```{r}
+ancs %>% count(biogeographic_prediction)
+```
+
+##### AFR anc
+```{r}
+AFR=subset(ancs, ancs$biogeographic_prediction=='African American / Afro-Caribbean')
+AFR %>% 
+  count(p21000_i0) %>%
+  arrange(desc(n)) 
+ggplot(AFR, aes(PC1, PC2, group=biogeographic_prediction, colour=biogeographic_prediction)) +
+  geom_scattermore(alpha = 0.01, pointsize = 6) +  # Adjust transparency and size to avoid overcrowding
+  labs(title="Biogeographic prediction", y="PC2", x="PC1", color="", fill="")+
+  guides(colour = guide_legend(override.aes = list(alpha=1,size=5),nrow=7,byrow=TRUE))+
+  theme(plot.title = element_text(size=20),
+        axis.title = element_text(size=16), 
+        axis.text = element_text(size=14),
+        legend.title = element_text(size=16), 
+        legend.text = element_text(size=14))+
+  xlim(-0.02,0.035)+
+  ylim(-0.035, 0.03)
+```
+
+##### SAS anc
+```{r}
+SAS=subset(ancs, ancs$biogeographic_prediction=='Central / South Asian')
+SAS %>% 
+  count(p21000_i0) %>%
+  arrange(desc(n))
+ggplot(SAS, aes(PC1, PC2, group=biogeographic_prediction, colour=biogeographic_prediction)) +
+  geom_scattermore(alpha = 0.01, pointsize = 6) +  # Adjust transparency and size to avoid overcrowding
+  labs(title="Biogeographic prediction", y="PC2", x="PC1", color="", fill="")+
+  guides(colour = guide_legend(override.aes = list(alpha=1,size=5),nrow=7,byrow=TRUE))+
+  theme(plot.title = element_text(size=20),
+        axis.title = element_text(size=16), 
+        axis.text = element_text(size=14),
+        legend.title = element_text(size=16), 
+        legend.text = element_text(size=14))+
+  xlim(-0.02,0.035)+
+  ylim(-0.035, 0.03)
+```
+
+##### EAS anc
+```{r}
+EAS=subset(ancs, ancs$biogeographic_prediction=='East Asian')
+EAS %>% 
+  count(p21000_i0) %>%
+  arrange(desc(n))
+ggplot(EAS, aes(PC1, PC2, group=biogeographic_prediction, colour=biogeographic_prediction)) +
+  geom_scattermore(alpha = 0.01, pointsize = 6) +  # Adjust transparency and size to avoid overcrowding
+  labs(title="Biogeographic prediction", y="PC2", x="PC1", color="", fill="")+
+  guides(colour = guide_legend(override.aes = list(alpha=1,size=5),nrow=7,byrow=TRUE))+
+  theme(plot.title = element_text(size=20),
+        axis.title = element_text(size=16), 
+        axis.text = element_text(size=14),
+        legend.title = element_text(size=16), 
+        legend.text = element_text(size=14))+
+  xlim(-0.02,0.035)+
+  ylim(-0.035, 0.03)
+```
+
+##### EUR anc
+```{r}
+EUR=subset(ancs, ancs$biogeographic_prediction=='European')
+EUR %>% 
+  count(p21000_i0) %>%
+  arrange(desc(n))
+EUR %>% 
+  count(p22006) %>%
+  arrange(desc(n))
+ggplot(EUR, aes(PC1, PC2, group=biogeographic_prediction, colour=biogeographic_prediction)) +
+  geom_scattermore(alpha = 0.02, pointsize = 6) +  # Adjust transparency and size to avoid overcrowding
+  labs(title="Biogeographic prediction", y="PC2", x="PC1", color="", fill="")+
+  guides(colour = guide_legend(override.aes = list(alpha=1,size=5),nrow=7,byrow=TRUE))+
+  theme(plot.title = element_text(size=20),
+        axis.title = element_text(size=16), 
+        axis.text = element_text(size=14),
+        legend.title = element_text(size=16), 
+        legend.text = element_text(size=14))+
+  xlim(-0.02,0.035)+
+  ylim(-0.035, 0.03)
+```
+
+Look at the low down EU cluster in more detail
+```{r}
+EUR=subset(ancs, ancs$biogeographic_prediction=='European')
+EU_cluster=subset(EUR, PC1 < -0.01)
+EU_cluster=subset(EU_cluster, PC2 < 0.0)
+# It's only 189 people
+
+EU_cluster %>% 
+  count(p21000_i0) %>%
+  arrange(desc(n))
+```
+
+##### AMR anc
+```{r}
+AMR=subset(ancs, ancs$biogeographic_prediction=='Latino')
+AMR %>% 
+  count(p21000_i0) %>%
+  arrange(desc(n))
+ggplot(AMR, aes(PC1, PC2, group=biogeographic_prediction, colour=biogeographic_prediction)) +
+  geom_scattermore(alpha = 0.01, pointsize = 6) +  # Adjust transparency and size to avoid overcrowding
+  labs(title="Biogeographic prediction", y="PC2", x="PC1", color="", fill="")+
+  guides(colour = guide_legend(override.aes = list(alpha=1,size=5),nrow=7,byrow=TRUE))+
+  theme(plot.title = element_text(size=20),
+        axis.title = element_text(size=16), 
+        axis.text = element_text(size=14),
+        legend.title = element_text(size=16), 
+        legend.text = element_text(size=14))+
+  xlim(-0.02,0.035)+
+  ylim(-0.0275, 0.03)
+
+```
+
+##### SSA anc
+```{r}
+SSA=subset(ancs, ancs$biogeographic_prediction=='Sub-Saharan African')
+SSA %>% 
+  count(p21000_i0) %>%
+  arrange(desc(n))
+ggplot(SSA, aes(PC1, PC2, group=biogeographic_prediction, colour=biogeographic_prediction)) +
+  geom_scattermore(alpha = 0.01, pointsize = 6) +  # Adjust transparency and size to avoid overcrowding
+  labs(title="Biogeographic prediction", y="PC2", x="PC1", color="", fill="")+
+  guides(colour = guide_legend(override.aes = list(alpha=1,size=5),nrow=7,byrow=TRUE))+
+  theme(plot.title = element_text(size=20),
+        axis.title = element_text(size=16), 
+        axis.text = element_text(size=14),
+        legend.title = element_text(size=16), 
+        legend.text = element_text(size=14))+
+  xlim(-0.02,0.035)+
+  ylim(-0.0275, 0.03)
+
+
+```
+
+##### UNK anc
+```{r}
+UNK=subset(ancs, ancs$biogeographic_prediction=='Unclassified')
+UNK %>% 
+  count(p21000_i0) %>%
+  arrange(desc(n))
+ggplot(UNK, aes(PC1, PC2, group=biogeographic_prediction, colour=biogeographic_prediction)) +
+  geom_scattermore(alpha = 0.01, pointsize = 6) +  # Adjust transparency and size to avoid overcrowding
+  labs(title="Biogeographic prediction", y="PC2", x="PC1", color="", fill="")+
+  guides(colour = guide_legend(override.aes = list(alpha=1,size=5),nrow=7,byrow=TRUE))+
+  theme(plot.title = element_text(size=20),
+        axis.title = element_text(size=16), 
+        axis.text = element_text(size=14),
+        legend.title = element_text(size=16), 
+        legend.text = element_text(size=14))+
+  xlim(-0.02,0.035)+
+  ylim(-0.0275, 0.03)
+
+
+```
+
+##### Other PCs
+```{r}
+ggplot(ancs, aes(PC3, PC4, group=biogeographic_prediction, colour=biogeographic_prediction)) +
+  geom_scattermore(alpha = 0.01, pointsize = 6) +  # Adjust transparency and size to avoid overcrowding
+  labs(title="Biogeographic prediction", color="", fill="")+
+  guides(colour = guide_legend(override.aes = list(alpha=1,size=5),nrow=7,byrow=TRUE))+
+  theme(plot.title = element_text(size=20),
+        axis.title = element_text(size=16), 
+        axis.text = element_text(size=14),
+        legend.title = element_text(size=16), 
+        legend.text = element_text(size=14))
+```
+```{r}
+ggplot(ancs, aes(PC5, PC6, group=biogeographic_prediction, colour=biogeographic_prediction)) +
+  geom_scattermore(alpha = 0.01, pointsize = 6) +  # Adjust transparency and size to avoid overcrowding
+  labs(title="Biogeographic prediction", color="", fill="")+
+  guides(colour = guide_legend(override.aes = list(alpha=1,size=5),nrow=7,byrow=TRUE))+
+  theme(plot.title = element_text(size=20),
+        axis.title = element_text(size=16), 
+        axis.text = element_text(size=14),
+        legend.title = element_text(size=16), 
+        legend.text = element_text(size=14))
+```
+
+```{r}
+ggplot(ancs, aes(PC7, PC8, group=biogeographic_prediction, colour=biogeographic_prediction)) +
+  geom_scattermore(alpha = 0.01, pointsize = 6) +  # Adjust transparency and size to avoid overcrowding
+  labs(title="Biogeographic prediction", color="", fill="")+
+  guides(colour = guide_legend(override.aes = list(alpha=1,size=5),nrow=7,byrow=TRUE))+
+  theme(plot.title = element_text(size=20),
+        axis.title = element_text(size=16), 
+        axis.text = element_text(size=14),
+        legend.title = element_text(size=16), 
+        legend.text = element_text(size=14))
+```
+
+```{r}
+ggplot(ancs, aes(PC9, PC10, group=biogeographic_prediction, colour=biogeographic_prediction)) +
+  geom_scattermore(alpha = 0.01, pointsize = 6) +  # Adjust transparency and size to avoid overcrowding
+  labs(title="Biogeographic prediction", color="", fill="")+
+  guides(colour = guide_legend(override.aes = list(alpha=1,size=5),nrow=7,byrow=TRUE))+
+  theme(plot.title = element_text(size=20),
+        axis.title = element_text(size=16), 
+        axis.text = element_text(size=14),
+        legend.title = element_text(size=16), 
+        legend.text = element_text(size=14))
+```
+
+##### Probability distribution
+```{r}
+ggplot(ancs, aes(EUR))+
+  geom_histogram()+
+  scale_y_log10()
+
+EU_prob_100=subset(ancs, EUR==1) # 463,961k samples with 100% prob of being european 
+EU_prob_0=subset(ancs, EUR==0)
+non_bimodal_EUprob=subset(ancs, (EUR>0)&(EUR<1))
+EUR_over.99=subset(non_bimodal_EUprob, EUR>=0.90)
+EUR_under.01=subset(non_bimodal_EUprob, EUR<=0.10)
+
+ggplot(non_bimodal_EUprob, aes(EUR))+
+  geom_histogram()
+```
+
+# Calculate PCs in each ancestral population
+## Write out list of IDs for each pop (on the RAP using the QC'd unrelated subset)
+This is done on the RAP using the QC'd unrelated subset!
+```{r}
+## Convert the ancs you wrote out above into the right ids
+system('dx download ./genetic_ancestries/app15175_ids/full_dataset_inferred_ancestries.csv')
+ancs_wrongid=read.csv('full_dataset_inferred_ancestries.csv', header=T)
+system('dx download ./phenotype_cohorts/link_AD.app15175_George.app14421_Xav.app17044_JW.app13310.txt')
+link_ids=read.table('link_AD.app15175_George.app14421_Xav.app17044_JW.app13310.txt', header=T)
+ancs=merge(ancs_wrongid, link_ids, by.x='FID', by.y='app15175')
+# Write out now have correct IDs
+write.csv(ancs, 'ancestries_PCs.csv')
+system('dx upload ancestries_PCs.csv ./genetic_ancestries/')
+
+
+system('dx download ./phenotype_cohorts/processed_cognition/processed_cog_tests_inc_g_Feb24.csv')
+phen=read.csv('processed_cog_tests_inc_g_Feb24.csv', header=T)
+system('dx download ./WES_QC/3rd_degree_rel_ids_to_keep_500k.csv')
+ids_to_keep=read.csv('3rd_degree_rel_ids_to_keep_500k.csv')
+all_ancs=merge(phen, ids_to_keep, by.x = 'eid', by.y = 'x')
+all_ancs = merge(all_ancs, ancs, by.x = 'eid', by.y = 'eid_13310')
+phen=all_ancs
+
+# Write out 15175 ids for use off the RAP
+# AAC 
+AAC_anc_ids=subset(phen, phen$AAC>0.8)
+AAC_15175<- AAC_anc_ids$FID
+write.table(AAC_15175, 'AAC_IDs.txt', row.names = F, col.names = F)
+# EAS
+EAS_anc_ids=subset(phen, phen$EAS>0.8)
+EAS_15175<- EAS_anc_ids$FID
+write.table(EAS_15175, 'EAS_IDs.txt', row.names = F, col.names = F)
+# EUR
+EUR_anc_ids=subset(phen, phen$EUR>0.8)
+EUR_15175<- EUR_anc_ids$FID
+write.table(EUR_15175, 'EUR_IDs.txt', row.names = F, col.names = F)
+# LAT
+LAT_anc_ids=subset(phen, phen$LAT>0.8)
+LAT_15175<- LAT_anc_ids$FID
+write.table(LAT_15175, 'LAT_IDs.txt', row.names = F, col.names = F)
+# SAS
+SAS_anc_ids=subset(phen, phen$SAS>0.8)
+SAS_15175<- SAS_anc_ids$FID
+write.table(SAS_15175, 'SAS_IDs.txt', row.names = F, col.names = F)
+# SSA
+SSA_anc_ids=subset(phen, phen$SSA>0.8)
+SSA_15175<- SSA_anc_ids$FID
+write.table(SSA_15175, 'SSA_IDs.txt', row.names = F, col.names = F)
+# ADMIXED
+Admixed_anc_ids=subset(phen, (phen$AAC<=0.8 & phen$EAS<=0.8 & 
+                              phen$EUR<=0.8 & phen$LAT<=0.8 & 
+                              phen$SAS<=0.8 & phen$SSA<=0.8))
+Admixed_15175<- Admixed_anc_ids$FID
+write.table(Admixed_15175, 'Admixed_IDs.txt', row.names = F, col.names = F)
+
+# Save these up to your project
+system('dx upload *IDs.txt ./')
+
+```
+
+Cp these files off the RAP onto scratch for use deriving PCs per ancestry on Hawk!
+
+## EUR subsample only
+Here, I'm running a PCA in the EUR-only subsample for use as covariates in the EUR-only analysis I plan to run. This requires filtering the original plink files to only the unrelated, QC-passing, EUR-like (ancestry probability >0.8) samples, merging the plink files across all chromosomes, and then running a PCA in plink and saving out (and plotting) the outputs. 
+
+### Filtering to the unrelated, EUR-like sample 
+scp samples up to project!!!!! but make into a txt list first??? 
+```{bash}
+# Get ids to keep list into the right format
+mkdir /scratch/c.c1928239/UKBB_array_data/EUR_only
+DATA_DIR="/scratch/c.c1928239/UKBB_array_data/EUR_only"
+paste <(cat /scratch/c.c1928239/UKBB_array_data/EUR_IDs.txt) <(cat /scratch/c.c1928239/UKBB_array_data/EUR_IDs.txt) > ${DATA_DIR}/EUR_IDs_app15175.txt
+
+# filter plink files (per chr) to just these ids
+for chr in {1..22}; do
+    plink2 --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved \
+          --keep EUR_IDs_app15175.txt \
+          --make-bed \
+          --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_EUR_only
+done 
+
+```
+
+### Pruning 
+#### Initial pruning 
+Originally ran this using --indep-pairwise 50 5 0.2, but the number of variants left in the dataset was too high for PCA to be run (904k variants, kept crashing as out of memory). Therefore used the settings used by PGC (https://sites.google.com/a/broadinstitute.org/ricopili/pca). 200 100 0.2 
+Even using these settings and pruning 2x over, and adding a maf 5% filter, still have 140k variants and pcas still require too much memory to run PCAs in plink, so pcas were calculated in hail in the end.  
+```{bash}
+DATA_DIR="/scratch/c.c1928239/UKBB_array_data"
+
+for chr in {1..22}; do
+    plink --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_EUR_only \
+          --indep-pairwise 200 100 0.2 \
+          --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_EUR_only_prunedsnps_PGCsettings
+done 
+
+for chr in {1..22}; do
+    plink --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_EUR_only \
+          --extract ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_EUR_only_prunedsnps_PGCsettings.prune.in \
+          --make-bed \
+          --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_EUR_only_pruned_PGCsettings
+done
+```
+#### Prune again 
+```{r}
+for chr in {1..22}; do
+    plink --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_EUR_only_pruned_PGCsettings \
+          --indep-pairwise 200 100 0.2 \
+          --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_EUR_only_prunedsnps_PGCsettings_secondprune
+done 
+
+for chr in {1..22}; do
+    plink --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_EUR_only_pruned_PGCsettings \
+          --extract ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_EUR_only_prunedsnps_PGCsettings_secondprune.prune.in \
+          --make-bed \
+          --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_EUR_only_pruned_PGCsettings_secondprune
+done
+```
+
+### Filter to MAF>5% 
+There are still too many SNPS for PCA, so filter to MAF>5% here 
+```{r}
+for chr in {1..22}; do
+    plink --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_EUR_only_pruned_PGCsettings_secondprune \
+           --maf 0.05 \
+           --make-bed \
+           --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover5percent_highLDremoved_EUR_only_pruned_PGCsettings_secondprune
+done
+
+```
+
+
+### Merging plink files across chromosomes 
+```{bash}
+# Create a list of filtered files for merging
+MERGE_LIST="${DATA_DIR}/merge_list.txt"
+for chr in {2..22}; do
+    echo "${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover5percent_highLDremoved_EUR_only_pruned_PGCsettings_secondprune" >> ${MERGE_LIST}
+done
+
+# This was crashing out on memory so i used a high mem (250gb) instance and specifically set the memory available to plink as 230GB
+plink --bfile /scratch/c.c1928239/UKBB_array_data/ukb_imp_chr1_multiancestry_MAFover5percent_highLDremoved_EUR_only_pruned_PGCsettings_secondprune  \
+      --merge-list merge_list.txt \
+      --make-bed \
+      --memory 235520 \
+      --out /scratch/c.c1928239/UKBB_array_data/merged_chromosomes_UKBB_Eur_only_MAF5_PGCsettings2ndprune
+
+```
+
+
+### Running the PCA 
+Initially I tried to calculate the PCs using plink, but it couldn't run due to the memory required (failing even with a 300GB session). I therefore read the plink files into hail, saved out a matrix table, and then calculate the PCs in Hail (again in a 300GB memory session using sbatch)
+```{bash}
+module rm compiler/intel/2018/2  
+module load ensembl-vep/102.0
+module load samtools/1.10
+module load python/3.7.0
+module load anaconda/2020.02
+module load sqlite3/3270200
+module load htslib/1.10.2
+
+export SPARK_WORKER_DIR=/scratch/c.c1928239/tmp/
+export SPARK_LOG_DIR=/scratch/c.c1928239/tmp/
+export SPARK_LOCAL_DIRS=/scratch/c.c1928239/tmp/
+export LD_PRELOAD=/usr/lib64/libblas.so:/usr/lib64/liblapack.so:/usr/lib64/libgslcblas.so:/usr/lib64/atlas/libsatlas.so.3
+
+# And then feed the following script into python
+import hail as hl
+hl.init(tmp_dir='/scratch/c.c1928239/tmp', spark_conf={
+    "spark.executor.extraClassPath": "/usr/lib64/libblas.so:/usr/lib64/liblapack.so:/usr/lib64/libgslcblas.so:/usr/lib64/liblapack.so:/usr/lib64/libgslcblas.so:/usr/lib64/atlas/libsatlas.so.3"})
+from hail import *
+import hail.expr.functions
+import bokeh
+from bokeh.io import show, output_notebook
+from bokeh.layouts import gridplot
+from bokeh.io import export_png
+from bokeh.plotting import figure, output_file, save
+
+mt = hl.import_plink(bed='merged_chromosomes_UKBB_Eur_only_MAF5_PGCsettings2ndprune.bed', 
+                     bim='merged_chromosomes_UKBB_Eur_only_MAF5_PGCsettings2ndprune.bim', 
+                     fam='merged_chromosomes_UKBB_Eur_only_MAF5_PGCsettings2ndprune.fam')
+mt.checkpoint('merged_chromosomes_UKBB_Eur_only_MAF5_PGCsettings2ndprune.mt')
+# Read back in 
+mt=hl.read_matrix_table('merged_chromosomes_UKBB_Eur_only_MAF5_PGCsettings2ndprune.mt')
+
+# Run PCA
+eigenvalues, pcs, _ = hl.hwe_normalized_pca(mt.GT)
+# Format table and then write out PCAs
+pcs = pcs.annotate(EU_PC1 = pcs.scores[0],
+        EU_PC2 = pcs.scores[1], EU_PC3 = pcs.scores[2],
+        EU_PC4 = pcs.scores[3], EU_PC5 = pcs.scores[4],
+        EU_PC6 = pcs.scores[5], EU_PC7 = pcs.scores[6],
+        EU_PC8 = pcs.scores[7], EU_PC9 = pcs.scores[8],
+        EU_PC10 = pcs.scores[9])
+pcs.flatten().export('PCAs_EUR_only.tsv',delimiter = "\t")
+```
+
+At this point, the outputs were uploaded to the RAP.
+
+
+
+
+## AAC subsample only
+
+### Filtering to the unrelated sample 
+scp samples up to project!!!!! but make into a txt list first??? 
+```{bash}
+# Get ids to keep list into the right format
+mkdir /scratch/c.c1928239/UKBB_array_data/AAC_only
+DATA_INPUT="/scratch/c.c1928239/UKBB_array_data"
+DATA_DIR="/scratch/c.c1928239/UKBB_array_data/AAC_only"
+
+paste <(cat /scratch/c.c1928239/UKBB_array_data/AAC_IDs.txt) <(cat /scratch/c.c1928239/UKBB_array_data/AAC_IDs.txt) > ${DATA_DIR}/AAC_IDs_app15175.txt
+
+module load plink/2.0
+
+# filter plink files (per chr) to just these ids
+for chr in {1..22}; do
+    plink2 --bfile ${DATA_INPUT}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved \
+          --keep AAC_IDs_app15175.txt \
+          --make-bed \
+          --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_AAC_only
+done 
+```
+
+### Pruning 
+#### Initial pruning 
+Originally ran this using --indep-pairwise 50 5 0.2, but the number of variants left in the dataset was too high for PCA to be run (904k variants, kept crashing as out of memory). Therefore used the settings used by PGC (https://sites.google.com/a/broadinstitute.org/ricopili/pca). 200 100 0.2 
+Even using these settings and pruning 2x over, and adding a maf 5% filter, still have 140k variants and pcas still require too much memory to run PCAs in plink, so pcas were calculated in hail in the end.  
+```{bash}
+for chr in {1..22}; do
+    plink --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_AAC_only \
+          --indep-pairwise 200 100 0.2 \
+          --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_AAC_only_prunedsnps_PGCsettings
+done 
+
+
+for chr in {1..22}; do
+    plink --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_AAC_only \
+          --extract ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_AAC_only_prunedsnps_PGCsettings.prune.in \
+          --make-bed \
+          --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_AAC_only_pruned_PGCsettings
+done
+```
+#### Prune again 
+```{r}
+for chr in {1..22}; do
+    plink --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_AAC_only_pruned_PGCsettings \
+          --indep-pairwise 200 100 0.2 \
+          --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_AAC_only_prunedsnps_PGCsettings_secondprune
+done 
+
+for chr in {1..22}; do
+    plink --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_AAC_only_pruned_PGCsettings \
+          --extract ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_AAC_only_prunedsnps_PGCsettings_secondprune.prune.in \
+          --make-bed \
+          --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_AAC_only_pruned_PGCsettings_secondprune
+done
+```
+
+### Filter to MAF>5% 
+There are still too many SNPS for PCA, so filter to MAF>5% here 
+```{r}
+for chr in {1..22}; do
+    plink --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_AAC_only_pruned_PGCsettings_secondprune \
+           --maf 0.05 \
+           --make-bed \
+           --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover5percent_highLDremoved_AAC_only_pruned_PGCsettings_secondprune
+done
+
+```
+
+
+### Merging plink files across chromosomes 
+```{bash}
+# Create a list of filtered files for merging
+MERGE_LIST="${DATA_DIR}/merge_list.txt"
+for chr in {2..22}; do
+    echo "${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover5percent_highLDremoved_AAC_only_pruned_PGCsettings_secondprune" >> ${MERGE_LIST}
+done
+
+# This was crashing out on memory so i used a high mem (250gb) instance and specifically set the memory available to plink as 230GB
+plink --bfile ${DATA_DIR}/ukb_imp_chr1_multiancestry_MAFover5percent_highLDremoved_AAC_only_pruned_PGCsettings_secondprune  \
+      --merge-list ${DATA_DIR}/merge_list.txt \
+      --make-bed \
+      --out ${DATA_DIR}/merged_chromosomes_UKBB_AAC_only_MAF5_PGCsettings2ndprune
+
+```
+
+
+### Running the PCA 
+Initially I tried to calculate the PCs using plink, but it couldn't run due to the memory required (failing even with a 300GB session). I therefore read the plink files into hail, saved out a matrix table, and then calculate the PCs in Hail (again in a 300GB memory session using sbatch)
+```{bash}
+module rm compiler/intel/2018/2  
+module load ensembl-vep/102.0
+module load samtools/1.10
+module load python/3.7.0
+module load anaconda/2020.02
+module load sqlite3/3270200
+module load htslib/1.10.2
+module load hail/0.2
+
+export SPARK_WORKER_DIR=/scratch/c.c1928239/tmp/
+export SPARK_LOG_DIR=/scratch/c.c1928239/tmp/
+export SPARK_LOCAL_DIRS=/scratch/c.c1928239/tmp/
+export LD_PRELOAD=/usr/lib64/libblas.so:/usr/lib64/liblapack.so:/usr/lib64/libgslcblas.so:/usr/lib64/atlas/libsatlas.so.3
+
+ipython
+# And then feed the following script into ipython
+import hail as hl
+hl.init(tmp_dir='/scratch/c.c1928239/tmp', spark_conf={
+    "spark.executor.extraClassPath": "/usr/lib64/libblas.so:/usr/lib64/liblapack.so:/usr/lib64/libgslcblas.so:/usr/lib64/liblapack.so:/usr/lib64/libgslcblas.so:/usr/lib64/atlas/libsatlas.so.3"})
+from hail import *
+import hail.expr.functions
+import bokeh
+from bokeh.io import show, output_notebook
+from bokeh.layouts import gridplot
+from bokeh.io import export_png
+from bokeh.plotting import figure, output_file, save
+
+mt = hl.import_plink(bed='merged_chromosomes_UKBB_AAC_only_MAF5_PGCsettings2ndprune.bed', 
+                     bim='merged_chromosomes_UKBB_AAC_only_MAF5_PGCsettings2ndprune.bim', 
+                     fam='merged_chromosomes_UKBB_AAC_only_MAF5_PGCsettings2ndprune.fam')
+mt.checkpoint('merged_chromosomes_UKBB_AAC_only_MAF5_PGCsettings2ndprune.mt')
+# Read back in 
+mt=hl.read_matrix_table('merged_chromosomes_UKBB_AAC_only_MAF5_PGCsettings2ndprune.mt')
+
+# Run PCA
+eigenvalues, pcs, _ = hl.hwe_normalized_pca(mt.GT)
+# Format table and then write out PCAs
+pcs = pcs.annotate(AAC_PC1 = pcs.scores[0],
+        AAC_PC2 = pcs.scores[1], AAC_PC3 = pcs.scores[2],
+        AAC_PC4 = pcs.scores[3], AAC_PC5 = pcs.scores[4],
+        AAC_PC6 = pcs.scores[5], AAC_PC7 = pcs.scores[6],
+        AAC_PC8 = pcs.scores[7], AAC_PC9 = pcs.scores[8],
+        AAC_PC10 = pcs.scores[9])
+pcs.flatten().export('PCAs_AAC_only.tsv',delimiter = "\t")
+```
+
+At this point, the outputs were uploaded to the RAP.
+
+
+## EAS subsample only
+### Filtering to the unrelated sample 
+```{bash}
+# Get ids to keep list into the right format
+mkdir /scratch/c.c1928239/UKBB_array_data/EAS_only
+DATA_INPUT="/scratch/c.c1928239/UKBB_array_data"
+DATA_DIR="/scratch/c.c1928239/UKBB_array_data/EAS_only"
+
+paste <(cat /scratch/c.c1928239/UKBB_array_data/EAS_IDs.txt) <(cat /scratch/c.c1928239/UKBB_array_data/EAS_IDs.txt) > ${DATA_DIR}/EAS_IDs_app15175.txt
+
+module load plink/2.0
+
+# filter plink files (per chr) to just these ids
+for chr in {1..22}; do
+    plink2 --bfile ${DATA_INPUT}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved \
+          --keep EAS_IDs_app15175.txt \
+          --make-bed \
+          --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_EAS_only
+done 
+```
+
+### Pruning 
+#### Initial pruning 
+Originally ran this using --indep-pairwise 50 5 0.2, but the number of variants left in the dataset was too high for PCA to be run (904k variants, kept crashing as out of memory). Therefore used the settings used by PGC (https://sites.google.com/a/broadinstitute.org/ricopili/pca). 200 100 0.2 
+Even using these settings and pruning 2x over, and adding a maf 5% filter, still have 140k variants and pcas still require too much memory to run PCAs in plink, so pcas were calculated in hail in the end.  
+```{bash}
+for chr in {1..22}; do
+    plink --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_EAS_only \
+          --indep-pairwise 200 100 0.2 \
+          --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_EAS_only_prunedsnps_PGCsettings
+done 
+
+for chr in {1..22}; do
+    plink --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_EAS_only \
+          --extract ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_EAS_only_prunedsnps_PGCsettings.prune.in \
+          --make-bed \
+          --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_EAS_only_pruned_PGCsettings
+done
+```
+#### Prune again 
+```{r}
+for chr in {1..22}; do
+    plink --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_EAS_only_pruned_PGCsettings \
+          --indep-pairwise 200 100 0.2 \
+          --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_EAS_only_prunedsnps_PGCsettings_secondprune
+done 
+
+for chr in {1..22}; do
+    plink --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_EAS_only_pruned_PGCsettings \
+          --extract ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_EAS_only_prunedsnps_PGCsettings_secondprune.prune.in \
+          --make-bed \
+          --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_EAS_only_pruned_PGCsettings_secondprune
+done
+```
+
+### Filter to MAF>5% 
+There are still too many SNPS for PCA, so filter to MAF>5% here 
+```{r}
+for chr in {1..22}; do
+    plink --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_EAS_only_pruned_PGCsettings_secondprune \
+           --maf 0.05 \
+           --make-bed \
+           --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover5percent_highLDremoved_EAS_only_pruned_PGCsettings_secondprune
+done
+
+```
+
+
+### Merging plink files across chromosomes 
+```{bash}
+# Create a list of filtered files for merging
+MERGE_LIST="${DATA_DIR}/merge_list.txt"
+for chr in {2..22}; do
+    echo "${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover5percent_highLDremoved_EAS_only_pruned_PGCsettings_secondprune" >> ${MERGE_LIST}
+done
+
+# This was crashing out on memory so i used a high mem (250gb) instance and specifically set the memory available to plink as 230GB
+plink --bfile ${DATA_DIR}/ukb_imp_chr1_multiancestry_MAFover5percent_highLDremoved_EAS_only_pruned_PGCsettings_secondprune  \
+      --merge-list merge_list.txt \
+      --make-bed \
+      --memory 235520 \
+      --out ${DATA_DIR}/merged_chromosomes_UKBB_EAS_only_MAF5_PGCsettings2ndprune
+
+```
+
+
+### Running the PCA 
+Initially I tried to calculate the PCs using plink, but it couldn't run due to the memory required (failing even with a 300GB session). I therefore read the plink files into hail, saved out a matrix table, and then calculate the PCs in Hail (again in a 300GB memory session using sbatch)
+```{bash}
+module rm compiler/intel/2018/2  
+module load ensembl-vep/102.0
+module load samtools/1.10
+module load python/3.7.0
+module load anaconda/2020.02
+module load sqlite3/3270200
+module load htslib/1.10.2
+module load hail/0.2
+
+export SPARK_WORKER_DIR=/scratch/c.c1928239/tmp/
+export SPARK_LOG_DIR=/scratch/c.c1928239/tmp/
+export SPARK_LOCAL_DIRS=/scratch/c.c1928239/tmp/
+export LD_PRELOAD=/usr/lib64/libblas.so:/usr/lib64/liblapack.so:/usr/lib64/libgslcblas.so:/usr/lib64/atlas/libsatlas.so.3
+
+# And then feed the following script into python
+ipython
+import hail as hl
+hl.init(tmp_dir='/scratch/c.c1928239/tmp', spark_conf={
+    "spark.executor.extraClassPath": "/usr/lib64/libblas.so:/usr/lib64/liblapack.so:/usr/lib64/libgslcblas.so:/usr/lib64/liblapack.so:/usr/lib64/libgslcblas.so:/usr/lib64/atlas/libsatlas.so.3"})
+from hail import *
+import hail.expr.functions
+import bokeh
+from bokeh.io import show, output_notebook
+from bokeh.layouts import gridplot
+from bokeh.io import export_png
+from bokeh.plotting import figure, output_file, save
+
+mt = hl.import_plink(bed='merged_chromosomes_UKBB_EAS_only_MAF5_PGCsettings2ndprune.bed', 
+                     bim='merged_chromosomes_UKBB_EAS_only_MAF5_PGCsettings2ndprune.bim', 
+                     fam='merged_chromosomes_UKBB_EAS_only_MAF5_PGCsettings2ndprune.fam')
+mt.checkpoint('merged_chromosomes_UKBB_EAS_only_MAF5_PGCsettings2ndprune.mt')
+# Read back in 
+mt=hl.read_matrix_table('merged_chromosomes_UKBB_EAS_only_MAF5_PGCsettings2ndprune.mt')
+
+# Run PCA
+eigenvalues, pcs, _ = hl.hwe_normalized_pca(mt.GT)
+# Format table and then write out PCAs
+pcs = pcs.annotate(EAS_PC1 = pcs.scores[0],
+        EAS_PC2 = pcs.scores[1], EAS_PC3 = pcs.scores[2],
+        EAS_PC4 = pcs.scores[3], EAS_PC5 = pcs.scores[4],
+        EAS_PC6 = pcs.scores[5], EAS_PC7 = pcs.scores[6],
+        EAS_PC8 = pcs.scores[7], EAS_PC9 = pcs.scores[8],
+        EAS_PC10 = pcs.scores[9])
+pcs.flatten().export('PCAs_EAS_only.tsv',delimiter = "\t")
+```
+
+At this point, the outputs were uploaded to the RAP.
+
+
+
+
+## LAT subsample only
+
+### Filtering to the unrelated sample 
+```{bash}
+# Get ids to keep list into the right format
+mkdir /scratch/c.c1928239/UKBB_array_data/LAT_only
+DATA_INPUT="/scratch/c.c1928239/UKBB_array_data"
+DATA_DIR="/scratch/c.c1928239/UKBB_array_data/LAT_only"
+
+paste <(cat /scratch/c.c1928239/UKBB_array_data/LAT_IDs.txt) <(cat /scratch/c.c1928239/UKBB_array_data/LAT_IDs.txt) > ${DATA_DIR}/LAT_IDs_app15175.txt
+
+module load plink/2.0
+
+# filter plink files (per chr) to just these ids
+for chr in {1..22}; do
+    plink2 --bfile ${DATA_INPUT}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved \
+          --keep ${DATA_DIR}/LAT_IDs_app15175.txt \
+          --make-bed \
+          --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_LAT_only
+done 
+```
+
+### Pruning 
+#### Initial pruning 
+Originally ran this using --indep-pairwise 50 5 0.2, but the number of variants left in the dataset was too high for PCA to be run (904k variants, kept crashing as out of memory). Therefore used the settings used by PGC (https://sites.google.com/a/broadinstitute.org/ricopili/pca). 200 100 0.2 
+Even using these settings and pruning 2x over, and adding a maf 5% filter, still have 140k variants and pcas still require too much memory to run PCAs in plink, so pcas were calculated in hail in the end.  
+```{bash}
+for chr in {1..22}; do
+    plink --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_LAT_only \
+          --indep-pairwise 200 100 0.2 \
+          --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_LAT_only_prunedsnps_PGCsettings
+done 
+
+for chr in {1..22}; do
+    plink --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_LAT_only \
+          --extract ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_LAT_only_prunedsnps_PGCsettings.prune.in \
+          --make-bed \
+          --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_LAT_only_pruned_PGCsettings
+done
+```
+#### Prune again 
+```{r}
+for chr in {1..22}; do
+    plink --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_LAT_only_pruned_PGCsettings \
+          --indep-pairwise 200 100 0.2 \
+          --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_LAT_only_prunedsnps_PGCsettings_secondprune
+done 
+
+for chr in {1..22}; do
+    plink --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_LAT_only_pruned_PGCsettings \
+          --extract ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_LAT_only_prunedsnps_PGCsettings_secondprune.prune.in \
+          --make-bed \
+          --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_LAT_only_pruned_PGCsettings_secondprune
+done
+```
+
+### Filter to MAF>5% 
+There are still too many SNPS for PCA, so filter to MAF>5% here 
+```{r}
+for chr in {1..22}; do
+    plink --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_LAT_only_pruned_PGCsettings_secondprune \
+           --maf 0.05 \
+           --make-bed \
+           --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover5percent_highLDremoved_LAT_only_pruned_PGCsettings_secondprune
+done
+
+```
+
+
+### Merging plink files across chromosomes 
+```{bash}
+# Create a list of filtered files for merging
+MERGE_LIST="${DATA_DIR}/merge_list.txt"
+for chr in {2..22}; do
+    echo "${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover5percent_highLDremoved_LAT_only_pruned_PGCsettings_secondprune" >> ${MERGE_LIST}
+done
+
+plink --bfile ${DATA_DIR}/ukb_imp_chr1_multiancestry_MAFover5percent_highLDremoved_LAT_only_pruned_PGCsettings_secondprune  \
+      --merge-list merge_list.txt \
+      --make-bed \
+      --out ${DATA_DIR}/merged_chromosomes_UKBB_LAT_only_MAF5_PGCsettings2ndprune
+
+```
+
+
+### Running the PCA 
+Initially I tried to calculate the PCs using plink, but it couldn't run due to the memory required (failing even with a 300GB session). I therefore read the plink files into hail, saved out a matrix table, and then calculate the PCs in Hail (again in a 300GB memory session using sbatch)
+```{bash}
+module rm compiler/intel/2018/2  
+module load ensembl-vep/102.0
+module load samtools/1.10
+module load python/3.7.0
+module load anaconda/2020.02
+module load sqlite3/3270200
+module load htslib/1.10.2
+
+export SPARK_WORKER_DIR=/scratch/c.c1928239/tmp/
+export SPARK_LOG_DIR=/scratch/c.c1928239/tmp/
+export SPARK_LOCAL_DIRS=/scratch/c.c1928239/tmp/
+export LD_PRELOAD=/usr/lib64/libblas.so:/usr/lib64/liblapack.so:/usr/lib64/libgslcblas.so:/usr/lib64/atlas/libsatlas.so.3
+
+ipython
+# And then feed the following script into python
+import hail as hl
+hl.init(tmp_dir='/scratch/c.c1928239/tmp', spark_conf={
+    "spark.executor.extraClassPath": "/usr/lib64/libblas.so:/usr/lib64/liblapack.so:/usr/lib64/libgslcblas.so:/usr/lib64/liblapack.so:/usr/lib64/libgslcblas.so:/usr/lib64/atlas/libsatlas.so.3"})
+from hail import *
+import hail.expr.functions
+import bokeh
+from bokeh.io import show, output_notebook
+from bokeh.layouts import gridplot
+from bokeh.io import export_png
+from bokeh.plotting import figure, output_file, save
+
+mt = hl.import_plink(bed='merged_chromosomes_UKBB_LAT_only_MAF5_PGCsettings2ndprune.bed', 
+                     bim='merged_chromosomes_UKBB_LAT_only_MAF5_PGCsettings2ndprune.bim', 
+                     fam='merged_chromosomes_UKBB_LAT_only_MAF5_PGCsettings2ndprune.fam')
+mt.checkpoint('merged_chromosomes_UKBB_LAT_only_MAF5_PGCsettings2ndprune.mt')
+# Read back in 
+mt=hl.read_matrix_table('merged_chromosomes_UKBB_LAT_only_MAF5_PGCsettings2ndprune.mt')
+
+# Run PCA
+eigenvalues, pcs, _ = hl.hwe_normalized_pca(mt.GT)
+# Format table and then write out PCAs
+pcs = pcs.annotate(LAT_PC1 = pcs.scores[0],
+        LAT_PC2 = pcs.scores[1], LAT_PC3 = pcs.scores[2],
+        LAT_PC4 = pcs.scores[3], LAT_PC5 = pcs.scores[4],
+        LAT_PC6 = pcs.scores[5], LAT_PC7 = pcs.scores[6],
+        LAT_PC8 = pcs.scores[7], LAT_PC9 = pcs.scores[8],
+        LAT_PC10 = pcs.scores[9])
+pcs.flatten().export('PCAs_LAT_only.tsv',delimiter = "\t")
+```
+
+At this point, the outputs were uploaded to the RAP.
+
+
+
+
+## SAS subsample only
+### Filtering to the unrelated sample 
+```{bash}
+# Get ids to keep list into the right format
+mkdir /scratch/c.c1928239/UKBB_array_data/SAS_only
+DATA_INPUT="/scratch/c.c1928239/UKBB_array_data"
+DATA_DIR="/scratch/c.c1928239/UKBB_array_data/SAS_only"
+
+paste <(cat /scratch/c.c1928239/UKBB_array_data/SAS_IDs.txt) <(cat /scratch/c.c1928239/UKBB_array_data/SAS_IDs.txt) > ${DATA_DIR}/SAS_IDs_app15175.txt
+
+module load plink/2.0
+
+# filter plink files (per chr) to just these ids
+for chr in {1..22}; do
+    plink2 --bfile ${DATA_INPUT}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved \
+          --keep ${DATA_DIR}/SAS_IDs_app15175.txt \
+          --make-bed \
+          --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_SAS_only
+done 
+```
+
+^^ running overnight 
+### Pruning 
+#### Initial pruning 
+Originally ran this using --indep-pairwise 50 5 0.2, but the number of variants left in the dataset was too high for PCA to be run (904k variants, kept crashing as out of memory). Therefore used the settings used by PGC (https://sites.google.com/a/broadinstitute.org/ricopili/pca). 200 100 0.2 
+Even using these settings and pruning 2x over, and adding a maf 5% filter, still have 140k variants and pcas still require too much memory to run PCAs in plink, so pcas were calcuSASed in hail in the end.  
+```{bash}
+for chr in {1..22}; do
+    plink --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_SAS_only \
+          --indep-pairwise 200 100 0.2 \
+          --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_SAS_only_prunedsnps_PGCsettings
+done 
+
+for chr in {1..22}; do
+    plink --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_SAS_only \
+          --extract ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_SAS_only_prunedsnps_PGCsettings.prune.in \
+          --make-bed \
+          --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_SAS_only_pruned_PGCsettings
+done
+```
+#### Prune again 
+```{r}
+for chr in {1..22}; do
+    plink --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_SAS_only_pruned_PGCsettings \
+          --indep-pairwise 200 100 0.2 \
+          --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_SAS_only_prunedsnps_PGCsettings_secondprune
+done 
+
+for chr in {1..22}; do
+    plink --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_SAS_only_pruned_PGCsettings \
+          --extract ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_SAS_only_prunedsnps_PGCsettings_secondprune.prune.in \
+          --make-bed \
+          --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_SAS_only_pruned_PGCsettings_secondprune
+done
+```
+
+### Filter to MAF>5% 
+There are still too many SNPS for PCA, so filter to MAF>5% here 
+```{r}
+for chr in {1..22}; do
+    plink --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_SAS_only_pruned_PGCsettings_secondprune \
+           --maf 0.05 \
+           --make-bed \
+           --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover5percent_highLDremoved_SAS_only_pruned_PGCsettings_secondprune
+done
+
+```
+
+
+### Merging plink files across chromosomes 
+```{bash}
+# Create a list of filtered files for merging
+MERGE_LIST="${DATA_DIR}/merge_list.txt"
+for chr in {2..22}; do
+    echo "${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover5percent_highLDremoved_SAS_only_pruned_PGCsettings_secondprune" >> ${MERGE_LIST}
+done
+
+# This was crashing out on memory so i used a high mem (250gb) instance and specifically set the memory available to plink as 230GB
+plink --bfile ${DATA_DIR}/ukb_imp_chr1_multiancestry_MAFover5percent_highLDremoved_SAS_only_pruned_PGCsettings_secondprune  \
+      --merge-list merge_list.txt \
+      --make-bed \
+      --memory 235520 \
+      --out ${DATA_DIR}/merged_chromosomes_UKBB_SAS_only_MAF5_PGCsettings2ndprune
+
+```
+
+
+### Running the PCA 
+Initially I tried to calculate the PCs using plink, but it couldn't run due to the memory required (failing even with a 300GB session). I therefore read the plink files into hail, saved out a matrix table, and then calculate the PCs in Hail (again in a 300GB memory session using sbatch)
+```{bash}
+module rm compiler/intel/2018/2  
+module load ensembl-vep/102.0
+module load samtools/1.10
+module load python/3.7.0
+module load anaconda/2020.02
+module load sqlite3/3270200
+module load htslib/1.10.2
+
+export SPARK_WORKER_DIR=/scratch/c.c1928239/tmp/
+export SPARK_LOG_DIR=/scratch/c.c1928239/tmp/
+export SPARK_LOCAL_DIRS=/scratch/c.c1928239/tmp/
+export LD_PRELOAD=/usr/lib64/libblas.so:/usr/lib64/liblapack.so:/usr/lib64/libgslcblas.so:/usr/lib64/atlas/libsatlas.so.3
+
+ipython
+# And then feed the following script into python
+import hail as hl
+hl.init(tmp_dir='/scratch/c.c1928239/tmp', spark_conf={
+    "spark.executor.extraClassPath": "/usr/lib64/libblas.so:/usr/lib64/liblapack.so:/usr/lib64/libgslcblas.so:/usr/lib64/liblapack.so:/usr/lib64/libgslcblas.so:/usr/lib64/atlas/libsatlas.so.3"})
+from hail import *
+import hail.expr.functions
+import bokeh
+from bokeh.io import show, output_notebook
+from bokeh.layouts import gridplot
+from bokeh.io import export_png
+from bokeh.plotting import figure, output_file, save
+
+mt = hl.import_plink(bed='merged_chromosomes_UKBB_SAS_only_MAF5_PGCsettings2ndprune.bed', 
+                     bim='merged_chromosomes_UKBB_SAS_only_MAF5_PGCsettings2ndprune.bim', 
+                     fam='merged_chromosomes_UKBB_SAS_only_MAF5_PGCsettings2ndprune.fam')
+mt.checkpoint('merged_chromosomes_UKBB_SAS_only_MAF5_PGCsettings2ndprune.mt')
+# Read back in 
+mt=hl.read_matrix_table('merged_chromosomes_UKBB_SAS_only_MAF5_PGCsettings2ndprune.mt')
+
+# Run PCA
+eigenvalues, pcs, _ = hl.hwe_normalized_pca(mt.GT)
+# Format table and then write out PCAs
+pcs = pcs.annotate(SAS_PC1 = pcs.scores[0],
+        SAS_PC2 = pcs.scores[1], SAS_PC3 = pcs.scores[2],
+        SAS_PC4 = pcs.scores[3], SAS_PC5 = pcs.scores[4],
+        SAS_PC6 = pcs.scores[5], SAS_PC7 = pcs.scores[6],
+        SAS_PC8 = pcs.scores[7], SAS_PC9 = pcs.scores[8],
+        SAS_PC10 = pcs.scores[9])
+pcs.flatten().export('PCAs_SAS_only.tsv',delimiter = "\t")
+```
+
+At this point, the outputs were uploaded to the RAP.
+
+
+
+
+
+## SSA subsample only
+### Filtering to the unrelated sample 
+```{bash}
+# Get ids to keep list into the right format
+mkdir /scratch/c.c1928239/UKBB_array_data/SSA_only
+DATA_INPUT="/scratch/c.c1928239/UKBB_array_data"
+DATA_DIR="/scratch/c.c1928239/UKBB_array_data/SSA_only"
+
+paste <(cat /scratch/c.c1928239/UKBB_array_data/SSA_IDs.txt) <(cat /scratch/c.c1928239/UKBB_array_data/SSA_IDs.txt) > ${DATA_DIR}/SSA_IDs_app15175.txt
+
+module load plink/2.0
+
+# filter plink files (per chr) to just these ids
+for chr in {1..22}; do
+    plink2 --bfile ${DATA_INPUT}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved \
+          --keep ${DATA_DIR}/SSA_IDs_app15175.txt \
+          --make-bed \
+          --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_SSA_only
+done 
+```
+
+^^ running overnight 
+### Pruning 
+#### Initial pruning 
+Originally ran this using --indep-pairwise 50 5 0.2, but the number of variants left in the dataset was too high for PCA to be run (904k variants, kept crashing as out of memory). Therefore used the settings used by PGC (https://sites.google.com/a/broadinstitute.org/ricopili/pca). 200 100 0.2 
+Even using these settings and pruning 2x over, and adding a maf 5% filter, still have 140k variants and pcas still require too much memory to run PCAs in plink, so pcas were calculated in hail in the end.  
+```{bash}
+for chr in {1..22}; do
+    plink --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_SSA_only \
+          --indep-pairwise 200 100 0.2 \
+          --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_SSA_only_prunedsnps_PGCsettings
+done 
+
+for chr in {1..22}; do
+    plink --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_SSA_only \
+          --extract ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_SSA_only_prunedsnps_PGCsettings.prune.in \
+          --make-bed \
+          --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_SSA_only_pruned_PGCsettings
+done
+```
+#### Prune again 
+```{r}
+for chr in {1..22}; do
+    plink --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_SSA_only_pruned_PGCsettings \
+          --indep-pairwise 200 100 0.2 \
+          --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_SSA_only_prunedsnps_PGCsettings_secondprune
+done 
+
+for chr in {1..22}; do
+    plink --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_SSA_only_pruned_PGCsettings \
+          --extract ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_SSA_only_prunedsnps_PGCsettings_secondprune.prune.in \
+          --make-bed \
+          --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_SSA_only_pruned_PGCsettings_secondprune
+done
+```
+
+### Filter to MAF>5% 
+There are still too many SNPS for PCA, so filter to MAF>5% here 
+```{r}
+for chr in {1..22}; do
+    plink --bfile ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover1percent_highLDremoved_SSA_only_pruned_PGCsettings_secondprune \
+           --maf 0.05 \
+           --make-bed \
+           --out ${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover5percent_highLDremoved_SSA_only_pruned_PGCsettings_secondprune
+done
+
+```
+
+
+### Merging plink files across chromosomes 
+```{bash}
+# Create a list of filtered files for merging
+MERGE_LIST="${DATA_DIR}/merge_list.txt"
+for chr in {2..22}; do
+    echo "${DATA_DIR}/ukb_imp_chr${chr}_multiancestry_MAFover5percent_highLDremoved_SSA_only_pruned_PGCsettings_secondprune" >> ${MERGE_LIST}
+done
+
+plink --bfile ${DATA_DIR}/ukb_imp_chr1_multiancestry_MAFover5percent_highLDremoved_SSA_only_pruned_PGCsettings_secondprune  \
+      --merge-list ${MERGE_LIST} \
+      --make-bed \
+      --out ${DATA_DIR}/merged_chromosomes_UKBB_SSA_only_MAF5_PGCsettings2ndprune
+
+```
+
+
+### Running the PCA 
+Initially I tried to calculate the PCs using plink, but it couldn't run due to the memory required (failing even with a 300GB session). I therefore read the plink files into hail, saved out a matrix table, and then calculate the PCs in Hail (again in a 300GB memory session using sbatch)
+```{bash}
+module rm compiler/intel/2018/2  
+module load ensembl-vep/102.0
+module load samtools/1.10
+module load python/3.7.0
+module load anaconda/2020.02
+module load sqlite3/3270200
+module load htslib/1.10.2
+module load hail/0.2
+
+export SPARK_WORKER_DIR=/scratch/c.c1928239/tmp/
+export SPARK_LOG_DIR=/scratch/c.c1928239/tmp/
+export SPARK_LOCAL_DIRS=/scratch/c.c1928239/tmp/
+export LD_PRELOAD=/usr/lib64/libblas.so:/usr/lib64/liblapack.so:/usr/lib64/libgslcblas.so:/usr/lib64/atlas/libsatlas.so.3
+
+ipython
+# And then feed the following script into python
+import hail as hl
+hl.init(tmp_dir='/scratch/c.c1928239/tmp', spark_conf={
+    "spark.executor.extraClassPath": "/usr/lib64/libblas.so:/usr/lib64/liblapack.so:/usr/lib64/libgslcblas.so:/usr/lib64/liblapack.so:/usr/lib64/libgslcblas.so:/usr/lib64/atlas/libsatlas.so.3"})
+from hail import *
+import hail.expr.functions
+import bokeh
+from bokeh.io import show, output_notebook
+from bokeh.layouts import gridplot
+from bokeh.io import export_png
+from bokeh.plotting import figure, output_file, save
+
+mt = hl.import_plink(bed='merged_chromosomes_UKBB_SSA_only_MAF5_PGCsettings2ndprune.bed', 
+                     bim='merged_chromosomes_UKBB_SSA_only_MAF5_PGCsettings2ndprune.bim', 
+                     fam='merged_chromosomes_UKBB_SSA_only_MAF5_PGCsettings2ndprune.fam')
+mt.checkpoint('merged_chromosomes_UKBB_SSA_only_MAF5_PGCsettings2ndprune.mt')
+# Read back in 
+mt=hl.read_matrix_table('merged_chromosomes_UKBB_SSA_only_MAF5_PGCsettings2ndprune.mt')
+
+# Run PCA
+eigenvalues, pcs, _ = hl.hwe_normalized_pca(mt.GT)
+# Format table and then write out PCAs
+pcs = pcs.annotate(SSA_PC1 = pcs.scores[0],
+        SSA_PC2 = pcs.scores[1], SSA_PC3 = pcs.scores[2],
+        SSA_PC4 = pcs.scores[3], SSA_PC5 = pcs.scores[4],
+        SSA_PC6 = pcs.scores[5], SSA_PC7 = pcs.scores[6],
+        SSA_PC8 = pcs.scores[7], SSA_PC9 = pcs.scores[8],
+        SSA_PC10 = pcs.scores[9])
+pcs.flatten().export('PCAs_SSA_only.tsv',delimiter = "\t")
+```
+
+At this point, the outputs were uploaded to the RAP.
+
+
+

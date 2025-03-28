@@ -1,0 +1,456 @@
+---
+title: "19_combined_analysis"
+output: html_document
+date: "2024-10-01"
+---
+
+# Combined analysis
+This script runs a combined analysis of RCVs, CNVs and PRS. This script ran for 40 minutes on a mem1_ssd1_v2_x8 RStudio instance, costing £0.40. 
+# Load libraries
+```{r}
+library(data.table)
+library(dplyr)
+library(purrr)
+install.packages('broom')
+library(broom)
+library(ggplot2)
+```
+
+# Prep data
+## Read in cognitive phenotypes
+```{r}
+system('dx download ./phenotype_cohorts/processed_cognition/processed_cog_tests_inc_g_Feb24.csv')
+phen=read.csv('processed_cog_tests_inc_g_Feb24.csv', header=T)
+
+```
+
+## Ancestries
+```{r}
+system('dx download ./genetic_ancestries/app15175_ids/full_dataset_inferred_ancestries.csv')
+ancs_wrongid=read.csv('full_dataset_inferred_ancestries.csv', header=T)
+system('dx download ./genetic_ancestries/app15175_ids/PCAs_*')
+EUR_PCs_wrongid=read.table('PCAs_EUR_only.tsv', header=T)
+AAC_PCs_wrongid=read.table('PCAs_AAC_only.tsv', header=T)
+EAS_PCs_wrongid=read.table('PCAs_EAS_only.tsv', header=T)
+LAT_PCs_wrongid=read.table('PCAs_LAT_only.tsv', header=T)
+SAS_PCs_wrongid=read.table('PCAs_SAS_only.tsv', header=T)
+SSA_PCs_wrongid=read.table('PCAs_SSA_only.tsv', header=T)
+ADM_PCs_wrongid=read.table('PCAs_ADM_only.tsv', header=T)
+
+system('dx download ./phenotype_cohorts/link_AD.app15175_George.app14421_Xav.app17044_JW.app13310.txt')
+link_ids=read.table('link_AD.app15175_George.app14421_Xav.app17044_JW.app13310.txt', header=T)
+ancs=merge(ancs_wrongid, link_ids, by.x='FID', by.y='app15175')
+ancs=merge(ancs, EUR_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+ancs=merge(ancs, AAC_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+ancs=merge(ancs, EAS_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+ancs=merge(ancs, LAT_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+ancs=merge(ancs, SAS_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+ancs=merge(ancs, SSA_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+ancs=merge(ancs, ADM_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+
+# Write out now have correct IDs
+write.csv(ancs, 'ancestries_PCs.csv')
+system('dx upload ancestries_PCs.csv ./genetic_ancestries/')
+
+# Merge 
+phen=merge(phen, ancs, by.x = 'eid', by.y='eid_13310')
+
+```
+
+## QC
+Filter to those passing the final QC stage (sex imputation)
+```{r}
+system('dx download ./WES_QC/discordant_sex_ids.csv')
+ids_to_rm=read.csv('discordant_sex_ids.csv')
+ids_to_rm$remove=T
+
+phen=merge(phen, ids_to_rm, by.x = 'eid', by.y='x', all=T)
+phen=subset(phen, is.na(phen$remove)) 
+
+```
+
+## Covariates
+Read in covariates (and prep for use). These phenotypes were selected in cohort browser and written out using the Table Exporter tool. 
+```{r}
+system('dx download ./phenotype_cohorts/covars_participant.csv')
+covars=read.csv('covars_participant.csv', header=T)
+
+covars$seq_batch<-covars$p32050
+covars$AC_attended<-covars$p54_i0
+covars$sex_1male[covars$p31 == 'Male']<-1
+covars$sex_1male[covars$p31 == 'Female']<-2
+covars$standardised_age <- (covars$p21022 - mean(covars$p21022, na.rm = TRUE)) / sd(covars$p21022, na.rm = TRUE)
+covars$standardised_age_squared<-covars$standardised_age*covars$standardised_age
+covars$sex_standardised_age<-covars$sex_1male * covars$standardised_age
+covars$sex_standardised_age_squared<-covars$sex_1male * covars$standardised_age_squared
+
+
+phen=merge(phen, covars, by.x='eid', by.y='eid')
+
+
+```
+
+## Diagnoses 
+These phenotypes were selected in cohort browser and written out using the Table Exporter tool. 
+```{r}
+system('dx download ./phenotypes_cog_diagnoses_participation_death.csv')
+diagnoses=read.csv('phenotypes_cog_diagnoses_participation_death.csv', header=T)
+
+# Make subset of people diagnosed with SZ - to run these regressions in if powered? 
+sz_diagnosed=subset(diagnoses, diagnoses$SZ==T) 
+sz_diagnosed_eur_only=subset(sz_diagnosed, sz_diagnosed$EUR>0.8)
+
+# Remove people with SZ, ID and/or ASD 
+diagnoses=subset(diagnoses, diagnoses$SZ==F & diagnoses$ASD==F & diagnoses$intellectual_disability==F) 
+diagnoses$no_diagnoses<-T
+diagnoses=diagnoses[,c(3,174)]
+
+phen=merge(phen, diagnoses, by='eid') 
+```
+
+
+
+## RCVs 
+Here were looking at RCVs in LoFi genes 
+```{r}
+AC='5orless'
+system('dx download ./Variant_counts/Gene_sets/pLI*_AC5orless_*.csv --overwrite')
+file_list <- list.files(path = "./", pattern = "*_AC5orless_counts.csv", full.names = TRUE)
+# Read, drop first column (V1), and merge each file
+counts <- lapply(file_list, function(file) {
+  data <- fread(file)  # Read the file
+  data[, V1 := NULL]  # Drop the first column (V1)
+  return(data)
+}) %>%
+reduce(function(x, y) merge(x, y, by = "Sample_ID", all = TRUE))  # Merge the data frames
+
+```
+
+
+
+## CNVs 
+```{r}
+system('dx download ./NDD_CNVs/Pathogenic_CNVs.csv')
+CNVs=read.csv('Pathogenic_CNVs.csv')
+CNVs$has_CNV_data<-T
+CNVs %>% count(filter_good_CNVs)
+CNVs$carries_HQ_CNV<-F
+CNVs$carries_HQ_CNV[CNVs$filter_good_CNVs=='Selected']<-T
+
+
+CNVs$SZ_enriched_CNV_carrier <- TRUE
+CNVs$SZ_enriched_CNV_carrier[CNVs$carries_HQ_CNV==F]<-NA
+CNVs %>% count(SZ_enriched_CNV_carrier)
+
+CNVs %>% count(Pathogenic_checked)
+CNVs$SZ_associated_CNV_carrier<-FALSE
+CNVs$SZ_associated_CNV_carrier[CNVs$Pathogenic_checked=='1q21.1del'|
+                               CNVs$Pathogenic_checked=='1q21.1dup'|
+                               CNVs$Pathogenic_checked=='NRXN1del'|
+                               CNVs$Pathogenic_checked=='3q29del'|
+                               CNVs$Pathogenic_checked=='WBS_dup'|
+                               CNVs$Pathogenic_checked=='PWS_dup'|
+                               CNVs$Pathogenic_checked=='15q11.2del'|
+                               CNVs$Pathogenic_checked=='15q13.3del'|
+                               CNVs$Pathogenic_checked=='16p13.11dup'|
+                               CNVs$Pathogenic_checked=='16p12.1del'|
+                               CNVs$Pathogenic_checked=='16p11.2distal_del'|
+                               CNVs$Pathogenic_checked=='16p11.2dup'|
+                               CNVs$Pathogenic_checked=='22q11.2del']<-TRUE
+CNVs$SZ_associated_CNV_carrier[CNVs$carries_HQ_CNV==F]<-NA
+CNVs %>% count(SZ_associated_CNV_carrier)
+
+
+CNVs$SZ_associated_CNV_carrier_no15q<-FALSE
+CNVs$SZ_associated_CNV_carrier_no15q[CNVs$Pathogenic_checked=='1q21.1del'|
+                               CNVs$Pathogenic_checked=='1q21.1dup'|
+                               CNVs$Pathogenic_checked=='NRXN1del'|
+                               CNVs$Pathogenic_checked=='3q29del'|
+                               CNVs$Pathogenic_checked=='WBS_dup'|
+                               CNVs$Pathogenic_checked=='PWS_dup'|
+                               CNVs$Pathogenic_checked=='15q13.3del'|
+                               CNVs$Pathogenic_checked=='16p13.11dup'|
+                               CNVs$Pathogenic_checked=='16p12.1del'|
+                               CNVs$Pathogenic_checked=='16p11.2distal_del'|
+                               CNVs$Pathogenic_checked=='16p11.2dup'|
+                               CNVs$Pathogenic_checked=='22q11.2del']<-TRUE
+CNVs$SZ_associated_CNV_carrier_no15q[CNVs$carries_HQ_CNV==F]<-NA
+CNVs %>% count(SZ_associated_CNV_carrier_no15q)
+
+
+CNVs$CNV_carrier_15q_only<-FALSE
+CNVs$CNV_carrier_15q_only[CNVs$Pathogenic_checked=='15q11.2del']<-TRUE
+CNVs$CNV_carrier_15q_only[CNVs$carries_HQ_CNV==F]<-NA
+CNVs %>% count(CNV_carrier_15q_only)
+
+CNVs_simple = CNVs[,c('f.eid','has_CNV_data', 
+                      'carries_HQ_CNV', 'SZ_enriched_CNV_carrier', 
+                      'SZ_associated_CNV_carrier', 'CNV_carrier_15q_only')]
+
+# Look at the people carrying >1 cnv
+duplicates <- CNVs_simple %>%
+  group_by(f.eid) %>%
+  filter(n() > 1)
+duplicates %>% count(f.eid) 
+
+# Make df with 1 row per person (as we're just interested in whether they're a carrier, rather than how many CNVs they carry)
+CNVs_summary <- CNVs_simple %>%
+  group_by(f.eid) %>%
+  summarise(across(everything(), any))  # Keeps TRUE if it appears in any row for that f.eid
+
+# Read in link ids file 
+system('dx download ./phenotype_cohorts/link_AD.app15175_George.app14421_Xav.app17044_JW.app13310.txt')
+link_ids=read.table('link_AD.app15175_George.app14421_Xav.app17044_JW.app13310.txt', header=T)
+CNVs_summary=merge(CNVs_summary, link_ids, by.x='f.eid', by.y='app14421')
+CNVs_summary=CNVs_summary[,c(9,2:6)]
+
+combined = merge(counts, CNVs_summary, by.x = 'Sample_ID', by.y = 'eid_13310', all.x=T) 
+combined$SZ_associated_CNV_carrier[is.na(combined$SZ_associated_CNV_carrier)]<-F
+combined$SZ_associated_CNV_carrier[combined$carries_HQ_CNV==F]<-NA
+combined %>% count(SZ_associated_CNV_carrier) # 2,986
+
+combined$SZ_enriched_CNV_carrier[is.na(combined$SZ_enriched_CNV_carrier)]<-F
+combined$SZ_enriched_CNV_carrier[combined$carries_HQ_CNV==F]<-NA
+combined %>% count(SZ_enriched_CNV_carrier) # 4,282
+
+combined$CNV_carrier_15q_only[is.na(combined$CNV_carrier_15q_only)]<-F
+combined$CNV_carrier_15q_only[combined$carries_HQ_CNV==F]<-NA
+combined %>% count(CNV_carrier_15q_only) # 1395
+
+```
+
+## PRS
+```{r}
+system('dx download ./SZ_PRS/*')
+UKB_derived_PRS=read.csv('data_participant.csv')
+UKB_derived_PRS$UKB_standard_SZ_PRS<- UKB_derived_PRS$p26275
+UKB_derived_PRS=UKB_derived_PRS[,c(1,5)]
+
+
+SL_derived_PRS=read.table('ukbb.multiancestry.SZ.prsice.all_score', header = T)
+SL_derived_PRS$SL_SZ_PRS <- SL_derived_PRS$Pt_0.05
+SZ_PRS<- SL_derived_PRS[,c('FID', 'SL_SZ_PRS')] # 487409
+
+# Check correlations?
+SZ_PRS=merge(SZ_PRS, link_ids, by.x='FID', by.y='app15175') #
+SZ_PRS=SZ_PRS[,c(5,2)]
+SZ_PRS<-merge(SZ_PRS, UKB_derived_PRS, by.x='eid_13310', by.y = 'eid', all=T)
+a<- SZ_PRS[,c(2,3)]
+correlations <- cor(a, use="pairwise.complete.obs") # 0.4
+
+combined = merge(combined, SZ_PRS, by.x = 'Sample_ID', by.y = 'eid_13310') 
+
+# Remove people with low quality data for any variant type 
+# 399,877 people with HQ sequencing data
+combined_HQ=subset(combined, !is.na(combined$SZ_enriched_CNV_carrier)) 
+combined_HQ=subset(combined_HQ, !is.na(combined_HQ$UKB_standard_SZ_PRS)) 
+
+
+
+```
+
+
+## Merge all together 
+```{r}
+all_ancs=merge(phen, combined_HQ, by.x='eid', by.y='Sample_ID')
+EU_ancs=subset(all_ancs, all_ancs$EUR>0.8)
+EU_ancs$ST_SL_SZ_PRS<- (EU_ancs$SL_SZ_PRS - mean(EU_ancs$SL_SZ_PRS, na.rm = TRUE)) / sd(EU_ancs$SL_SZ_PRS, na.rm = TRUE)
+
+array_batch=read.csv('array_batch_participant.csv')
+array_batch %>% count(array_batch$p22000)
+array_batch=subset(array_batch, array_batch$p22000!='')
+array_batch$genotype_batch<-array_batch$p22000
+array_batch=array_batch[,c(1,3)]
+EU_ancs=merge(EU_ancs, array_batch, by='eid')
+
+
+EU_ancs_w_g=subset(EU_ancs, !is.na(EU_ancs$g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm)) # 75,111
+backup=EU_ancs_w_g
+```
+
+# Run regressions!!
+## Prep covars
+```{r}
+system('dx download ./Variant_counts/Gene_sets/Feb25/exome_wide_synonymous_AC5orless_counts.csv')
+a=read.csv('exome_wide_synonymous_AC5orless_counts.csv')
+EU_ancs_w_g=merge(EU_ancs_w_g, a, by.x='eid', by.y='Sample_ID')
+
+covars = 'seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + sex_standardised_age + sex_standardised_age_squared + synonymous_AC5orless_exome_wide_total + AAC + EAS + LAT + SAS + EU_PC1 + EU_PC2 + EU_PC3 + EU_PC4 + EU_PC5 + EU_PC6 + EU_PC7 + EU_PC8 + EU_PC9 + EU_PC10 + genotype_batch'
+```
+
+## Multivariable
+``` {r}
+# full model
+multivar_model <- lm(g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm ~ 
+                       PTV_AC5orless_pLI_0.9_total + 
+                       REVEL75_Miss_AC5orless_pLI_0.9_total + 
+                       SZ_enriched_CNV_carrier +
+                       ST_SL_SZ_PRS +
+                       seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + 
+                       sex_standardised_age + sex_standardised_age_squared + synonymous_AC5orless_exome_wide_total + 
+                       AAC + EAS + LAT + SAS + 
+                       EU_PC1 + EU_PC2 + EU_PC3 + EU_PC4 + EU_PC5 + 
+                       EU_PC6 + EU_PC7 + EU_PC8 + EU_PC9 + EU_PC10 + genotype_batch, 
+                     data = EU_ancs_w_g) 
+tidy_model <- tidy(multivar_model)
+CIs<- confint(multivar_model)
+
+adj_r2_multivar <- summary(multivar_model)$adj.r.squared # 0.17689
+
+
+
+
+
+
+# minus each predictor to get r2 
+multivar_model_minusPTVs <- lm(g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm ~ 
+                       REVEL75_Miss_AC5orless_pLI_0.9_total + 
+                       SZ_enriched_CNV_carrier +
+                       ST_SL_SZ_PRS +
+                       seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + 
+                       sex_standardised_age + sex_standardised_age_squared + synonymous_AC5orless_exome_wide_total + 
+                       AAC + EAS + LAT + SAS + 
+                       EU_PC1 + EU_PC2 + EU_PC3 + EU_PC4 + EU_PC5 + 
+                       EU_PC6 + EU_PC7 + EU_PC8 + EU_PC9 + EU_PC10 + genotype_batch, 
+                     data = EU_ancs_w_g) 
+summary(multivar_model)$adj.r.squared - summary(multivar_model_minusPTVs)$adj.r.squared
+
+
+
+
+
+multivar_model_minusmiss <- lm(g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm ~ 
+                       PTV_AC5orless_pLI_0.9_total + 
+                       SZ_enriched_CNV_carrier +
+                       ST_SL_SZ_PRS +
+                       seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + 
+                       sex_standardised_age + sex_standardised_age_squared + synonymous_AC5orless_exome_wide_total + 
+                       AAC + EAS + LAT + SAS + 
+                       EU_PC1 + EU_PC2 + EU_PC3 + EU_PC4 + EU_PC5 + 
+                       EU_PC6 + EU_PC7 + EU_PC8 + EU_PC9 + EU_PC10 + genotype_batch, 
+                     data = EU_ancs_w_g) 
+summary(multivar_model)$adj.r.squared - summary(multivar_model_minusmiss)$adj.r.squared
+
+
+
+
+
+
+multivar_model_minusCNV <- lm(g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm ~ 
+                       PTV_AC5orless_pLI_0.9_total + 
+                       REVEL75_Miss_AC5orless_pLI_0.9_total + 
+                       ST_SL_SZ_PRS +
+                       seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + 
+                       sex_standardised_age + sex_standardised_age_squared + synonymous_AC5orless_exome_wide_total + 
+                       AAC + EAS + LAT + SAS + 
+                       EU_PC1 + EU_PC2 + EU_PC3 + EU_PC4 + EU_PC5 + 
+                       EU_PC6 + EU_PC7 + EU_PC8 + EU_PC9 + EU_PC10 + genotype_batch, 
+                     data = EU_ancs_w_g) 
+summary(multivar_model)$adj.r.squared - summary(multivar_model_minusCNV)$adj.r.squared
+
+
+
+multivar_model_minusPRS <- lm(g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm ~ 
+                       PTV_AC5orless_pLI_0.9_total + 
+                       REVEL75_Miss_AC5orless_pLI_0.9_total + 
+                       SZ_enriched_CNV_carrier +
+                       seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + 
+                       sex_standardised_age + sex_standardised_age_squared + synonymous_AC5orless_exome_wide_total + 
+                       AAC + EAS + LAT + SAS + 
+                       EU_PC1 + EU_PC2 + EU_PC3 + EU_PC4 + EU_PC5 + 
+                       EU_PC6 + EU_PC7 + EU_PC8 + EU_PC9 + EU_PC10 + genotype_batch, 
+                     data = EU_ancs_w_g) 
+summary(multivar_model)$adj.r.squared - summary(multivar_model_minusPRS)$adj.r.squared
+
+
+multivar_model_minusAllgeneticfactors <- lm(g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm ~
+                       seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + 
+                       sex_standardised_age + sex_standardised_age_squared + synonymous_AC5orless_exome_wide_total + 
+                       AAC + EAS + LAT + SAS + 
+                       EU_PC1 + EU_PC2 + EU_PC3 + EU_PC4 + EU_PC5 + 
+                       EU_PC6 + EU_PC7 + EU_PC8 + EU_PC9 + EU_PC10 + genotype_batch, 
+                     data = EU_ancs_w_g) 
+summary(multivar_model)$adj.r.squared - summary(multivar_model_minusAllgeneticfactors)$adj.r.squared
+
+
+
+```
+
+# Univariable
+## Get r2 for just covar model 
+```{r}
+just_covar_model <- lm(g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm ~ 
+                       seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + 
+                       sex_standardised_age + sex_standardised_age_squared + synonymous_AC5orless_exome_wide_total + 
+                       AAC + EAS + LAT + SAS + 
+                       EU_PC1 + EU_PC2 + EU_PC3 + EU_PC4 + EU_PC5 + 
+                       EU_PC6 + EU_PC7 + EU_PC8 + EU_PC9 + EU_PC10 + genotype_batch, 
+                     data = EU_ancs_w_g) 
+adj_r2_justcovar <- summary(just_covar_model)$adj.r.squared # 0.1740099
+
+```
+
+## PTVs
+``` {r}
+univar_model <- lm(g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm ~ 
+                       PTV_AC5orless_pLI_0.9_total + 
+                       seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + 
+                       sex_standardised_age + sex_standardised_age_squared + synonymous_AC5orless_exome_wide_total + 
+                       AAC + EAS + LAT + SAS + 
+                       EU_PC1 + EU_PC2 + EU_PC3 + EU_PC4 + EU_PC5 + 
+                       EU_PC6 + EU_PC7 + EU_PC8 + EU_PC9 + EU_PC10 + genotype_batch, 
+                     data = EU_ancs_w_g) 
+tidy_model <- tidy(univar_model)
+CIs<- confint(univar_model)
+
+summary(univar_model)$adj.r.squared - adj_r2_justcovar
+```
+
+
+## Miss
+``` {r}
+univar_model <- lm(g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm ~ 
+                       REVEL75_Miss_AC5orless_pLI_0.9_total + 
+                       seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + 
+                       sex_standardised_age + sex_standardised_age_squared + synonymous_AC5orless_exome_wide_total + 
+                       AAC + EAS + LAT + SAS + 
+                       EU_PC1 + EU_PC2 + EU_PC3 + EU_PC4 + EU_PC5 + 
+                       EU_PC6 + EU_PC7 + EU_PC8 + EU_PC9 + EU_PC10 + genotype_batch, 
+                     data = EU_ancs_w_g) 
+tidy_model <- tidy(univar_model)
+CIs<- confint(univar_model)
+
+summary(univar_model)$adj.r.squared - adj_r2_justcovar
+```
+
+## PRS
+``` {r}
+univar_model <- lm(g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm ~ 
+                       ST_SL_SZ_PRS + 
+                       seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + 
+                       sex_standardised_age + sex_standardised_age_squared + synonymous_AC5orless_exome_wide_total + 
+                       AAC + EAS + LAT + SAS + 
+                       EU_PC1 + EU_PC2 + EU_PC3 + EU_PC4 + EU_PC5 + 
+                       EU_PC6 + EU_PC7 + EU_PC8 + EU_PC9 + EU_PC10 + genotype_batch, 
+                     data = EU_ancs_w_g) 
+tidy_model <- tidy(univar_model)
+CIs<- confint(univar_model)
+
+summary(univar_model)$adj.r.squared - adj_r2_justcovar
+```
+
+## SZ enriched CNVs
+``` {r}
+univar_model <- lm(g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm ~ 
+                       SZ_enriched_CNV_carrier + 
+                       seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + 
+                       sex_standardised_age + sex_standardised_age_squared + synonymous_AC5orless_exome_wide_total + 
+                       AAC + EAS + LAT + SAS + 
+                       EU_PC1 + EU_PC2 + EU_PC3 + EU_PC4 + EU_PC5 + 
+                       EU_PC6 + EU_PC7 + EU_PC8 + EU_PC9 + EU_PC10 + genotype_batch, 
+                     data = EU_ancs_w_g) 
+tidy_model <- tidy(univar_model)
+CIs<- confint(univar_model)
+
+summary(univar_model)$adj.r.squared - adj_r2_justcovar
+```

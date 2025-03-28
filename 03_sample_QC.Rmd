@@ -1,0 +1,291 @@
+---
+title: "sample_qc"
+output: html_document
+---
+# 3: Sample-level QC
+This script reads in sample QC tables which were written out in stage 1 of processing following genotype QC. These are processed into a format that is easy to work with, and then sample QC metrics are plotted. I ran this using a mem2_ssd2_v2_x48 instance, and the cost to run this script was around £3.
+
+
+## Running .Rmd scripts in the RAP 
+To work on the RMarkdown environment in RAP, you need to download scripts from your project. You can do this using dx download in the terminal in RMd ('dx downlaod ./path/to/script.Rmd') and then opening this from the environment. When you're done with editing your script, save it in Rmd and then use the final command in this script to upload the updated version to your project. 
+
+## Load libraries
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(ggplot2)
+library(tibble)
+library(ggplot2)
+```
+
+## Read in sample QC metrics and reformat for each chromosome, then read all into one big QC table 
+### Prepare a function to read in and clean data
+```{r}
+process_chromosome <- function(chr_number) {
+  # Read in data
+  file_path<-paste0('/mnt/project/sample_and_var_QC_metrics/chr_', chr_number, "_post_geno_QC_sample_qc.csv")
+  s <- read.csv(file_path, header = FALSE)
+  
+  # Remove row 1
+  s <- s[-1,]
+  
+  # Select columns
+  s <- s %>% select(V1, V2, V6, V10, V25:V27)
+  
+  # Reformat columns
+  s$V1 <- sub("^.*:", "", s$V1, perl = TRUE)
+  s$V2 <- sub("^.*:", "", s$V2, perl = TRUE)
+  s$V6 <- sub("^.*:", "", s$V6, perl = TRUE)
+  s$V10 <- sub("^.*:", "", s$V10, perl = TRUE)
+  s$V25 <- sub("^.*:", "", s$V25, perl = TRUE)
+  s$V26 <- sub("^.*:", "", s$V26, perl = TRUE)
+  s$V27 <- sub("^.*:", "", s$V27, perl = TRUE)
+  s$V27 <- substr(s$V27, 1, nchar(s$V27) - 1)
+  
+  # Rename columns
+  names(s)[names(s) == "V1"] <- "sample_id"
+  names(s)[names(s) == "V2"] <- paste0("Dp_stats_mean_", chr_number)
+  names(s)[names(s) == "V6"] <- paste0("GQ_stats_mean_", chr_number)
+  names(s)[names(s) == "V10"] <- paste0("Call_rate_", chr_number)
+  names(s)[names(s) == "V25"] <- paste0("Ti_Tv_", chr_number)
+  names(s)[names(s) == "V26"] <- paste0("Het_Hom_", chr_number)
+  names(s)[names(s) == "V27"] <- paste0("Ins_Del_", chr_number)
+  # Return processed dataframe
+  return(s)
+}
+```
+
+### Merge together and save out
+Initialize an empty data frame to store the merged data
+```{r}
+# Create an empty list to store dataframes for each chromosome
+chr_list <- list()
+
+# Loop through each chromosome
+for (chr in c(1:24)) {
+  # Process chromosome and store in the list
+  chr_list[[chr]] <- process_chromosome(chr)
+}
+
+# Merge dataframes from the list
+s <- Reduce(function(x, y) merge(x, y, by = 'sample_id'), chr_list)
+
+# Reformat all values to be numeric
+s <- s %>% mutate_if(is.character, as.numeric)
+
+write.csv(s, 'sample_qc_metrics_per_chr.csv')
+system('dx upload sample_qc_metrics_per_chr.csv --destination ./sample_and_var_QC_metrics/')
+```
+
+## Calculate QC metrics across all chromosome and plot these 
+```{r}
+# Create list of n variant in each chromosome (as it is from these that the sample QC metrics are formed)
+s=read.csv('sample_qc_metrics_per_chr.csv')
+# Get a list of n variants in each chromosome, as these are needed to get overall sample level means from each chromosome mean
+multipliers <- c(2455972,1798223,1429128,979038,1086949,1217837,1169984,894719,1053780,998446,1466607,1306097,437691, 767080,849142,1195778,1445048,392461,1668679, 633154,262815,565529,531571,5486)
+# Don't include y chr in this
+multipliers <- c(2455972,1798223,1429128,979038,1086949,1217837,1169984,894719,1053780,998446,1466607,1306097,437691, 767080,849142,1195778,1445048,392461,1668679, 633154,262815,565529,531571)
+```
+
+### Mean depth per sample
+```{r}
+# Loop through each multiplier
+for (i in seq_along(multipliers)) {
+  # Calculate total depth per sample for each chromosome
+  s[[paste0("dp_total_", i)]] <- s[[paste0("Dp_stats_mean_", i)]] * multipliers[i]
+}
+
+
+# Sum all total depth columns together
+s$total_dps <- rowSums(s[, grep("^dp_total_", names(s))])
+
+# Calculate mean depth per sample
+s$mean_dp <- s$total_dps / sum(multipliers)
+
+# Plot mean depth per sample
+ggplot(s, aes(mean_dp)) +
+  geom_freqpoly(bins = 1000) +
+  ggtitle("Mean depth per sample") +
+  xlab("Mean sequencing depth")
+
+# Plot mean depth per sample
+ggplot(s, aes(mean_dp)) +
+  geom_freqpoly(bins = 100) +
+  ggtitle("Mean depth per sample") +
+  xlab("Mean sequencing depth")+
+  xlim(18,20)
+
+# Box plot 
+ggplot(s, aes(mean_dp))+
+  geom_boxplot()+
+  ggtitle("Mean depth per sample")
+
+```
+### Mean GQ per sample
+```{r}
+for (i in seq_along(multipliers)) {
+  s[[paste0("GQ_total_", i)]] <- s[[paste0("GQ_stats_mean_", i)]] * multipliers[i]
+}
+
+s$total_GQs <- rowSums(s[, grep("^GQ_total_", names(s))])
+s$mean_GQ <- s$total_GQs / sum(multipliers)
+
+ggplot(s, aes(mean_GQ)) +
+  geom_freqpoly(bins = 100) +
+  ggtitle("Mean genotype quality per sample") +
+  xlab("Mean genotype quality")+
+  xlim(60,70)
+
+# Box plot 
+ggplot(s, aes(mean_GQ))+
+  geom_boxplot()+
+  ggtitle("Mean GQ per sample")
+```
+
+### Mean call rate per sample
+```{r}
+for (i in seq_along(multipliers)) {
+  s[[paste0("Call_rate_total", i)]] <- s[[paste0("Call_rate_", i)]] * multipliers[i]
+}
+
+s$total_call_rate <- rowSums(s[, grep("^Call_rate_total", names(s))])
+s$mean_call_rate <- s$total_call_rate / sum(multipliers)
+
+ggplot(s, aes(mean_call_rate)) +
+  geom_freqpoly(bins = 100) +
+  ggtitle("Mean call rate per sample") +
+  xlab("Mean call rate")
+
+
+ggplot(s, aes(mean_call_rate)) +
+  geom_histogram(bins = 100) +
+  ggtitle("Mean call rate per sample") +
+  xlab("Mean call rate")
+
+
+ggplot(s, aes(mean_call_rate)) +
+  geom_boxplot() +
+  ggtitle("Mean call rate per sample")
+```
+
+
+
+### TiTV ratio
+```{r}
+for (i in seq_along(multipliers)) {
+  s[[paste0("TiTV_total", i)]] <- s[[paste0("Ti_Tv_", i)]] * multipliers[i]
+}
+
+s$total_TiTV <- rowSums(s[, grep("^TiTV_total", names(s))])
+s$mean_TiTV <- s$total_TiTV / sum(multipliers)
+
+ggplot(s, aes(mean_TiTV))+
+  geom_freqpoly(bins = 100)+
+  ggtitle("Mean Ti_Tv per sample")+
+  xlab("Mean Ti_Tv")
+
+ggplot(s, aes(mean_TiTV)) +
+  geom_boxplot(bins = 100) +
+  ggtitle("Transition:transversion ratio per sample")
+```
+
+### Hethom ratio
+```{r}
+for (i in seq_along(multipliers)) {
+  s[[paste0("Hethom_total_", i)]] <- s[[paste0("Het_Hom_", i)]] * multipliers[i]
+}
+
+s$total_hethom <- rowSums(s[, grep("^Hethom_total_", names(s))])
+s$mean_hethom <- s$total_hethom / sum(multipliers)
+
+ggplot(s, aes(mean_hethom))+
+  geom_freqpoly(bins = 100)+
+  ggtitle("Mean Het_hom per sample")+
+  xlab("Mean Het_hom")
+
+ggplot(s, aes(mean_hethom)) +
+  geom_boxplot() +
+  ggtitle("Het:hom variant ratio per sample")
+```
+
+### Ins_del ratio
+```{r}
+for (i in seq_along(multipliers)) {
+  s[[paste0("ins_del_total_", i)]] <- s[[paste0("Ins_Del_", i)]] * multipliers[i]
+}
+
+s$total_insdel<- rowSums(s[, grep("^ins_del_total_", names(s))])
+s$mean_insdel <- s$total_insdel / sum(multipliers)
+
+ggplot(s, aes(mean_insdel))+
+  geom_freqpoly(bins = 100)+
+  ggtitle("Mean Ins_del per sample")+
+  xlab("Mean Ins_del")
+
+ggplot(s, aes(mean_insdel)) +
+  geom_boxplot(bins = 100) +
+  ggtitle("Insertion:deletion allele ratio per sample")
+```
+
+### Write these QC metrics out
+Write out the table of QC metrics, and a list of samples to keep following decisions on cut-offs. Here, we;ve decided to remove samples with mean call rate < 80%, so we write out a list of IDs of high quality samples to keep. This list can be used to filter the MT at a later stage. 
+```{r}
+sample_qc_means=s[,c('sample_id','mean_dp','mean_GQ','mean_call_rate', 'mean_TiTv', 'mean_hethom', 'mean_insdel')]
+sample_qc_means=s[,c(2,171,196,221,246,271,296)]
+write.csv(sample_qc_means, 'sample_qc_metrics.csv')
+system("dx upload sample_qc_metrics.csv --destination ./sample_and_var_QC_metrics/")
+
+HQ_samples=subset(sample_qc_means, sample_qc_means$mean_call_rate>0.8) # 469364 of 469835 samples 
+samples_to_keep=HQ_samples$sample_id
+write.table(samples_to_keep, 'ids_with_call_rate_over_80_percent.tsv', row.names = F)
+system("dx upload ids_with_call_rate_over_80_percent.tsv --destination ./WES_QC")
+```
+
+## Plots
+```{r}
+a=read.csv('sample_qc_metrics.csv')
+library(scales)
+
+
+tiff("sample_seq_call_rate.tiff", units="in", width=12, height=12, res=400)
+ggplot(a, aes(mean_call_rate)) +
+  geom_histogram(binwidth = 0.005)+
+  labs(x = '\n Mean Sequencing Call Rate', y = 'Count', title = '(a) Mean Call Rate Per Sample') +
+  theme_minimal() +
+  geom_vline(xintercept = 0.8, color = 'red')+
+  theme(text = element_text(size = 25))+
+  scale_y_continuous(labels = comma)
+dev.off()
+
+
+tiff("sample_seq_GD.tiff", units="in", width=12, height=12, res=400)
+ggplot(a, aes(mean_dp)) +
+  geom_histogram(binwidth = 0.25)+
+  labs(x = '\n Mean Genotype Depth', y = 'Count', title = '(b) Mean Genotype Depth Per Sample') +
+  theme_minimal() +
+  theme(text = element_text(size = 25))+
+  scale_y_continuous(labels = comma)
+dev.off()
+
+
+tiff("sample_seq_GQ.tiff", units="in", width=12, height=12, res=400)
+ggplot(a, aes(mean_GQ)) +
+  geom_histogram(binwidth = 0.25)+
+  labs(x = '\n Mean Genotype Quality', y = 'Count', title = '(c) Mean Genotype Quality Per Sample') +
+  theme_minimal() +
+  theme(text = element_text(size = 25))+
+  scale_y_continuous(labels = comma)
+dev.off()
+
+
+
+
+```
+
+# Save notebook to project storage
+Save any edits to your notebook first, then upload it to your project as below: 
+```{r}
+system("dx upload 1c_sample_QC.Rmd --destination ./Scripts/")
+```
+
+

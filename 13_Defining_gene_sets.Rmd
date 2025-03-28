@@ -1,0 +1,489 @@
+---
+title: "13_Defining_gene_sets"
+output: html_document
+date: "2025-01-27"
+---
+# Defining gene sets
+This script uses data from different publications to define different gene sets. It was run locally and outputs were then uploaded to the RAP. 
+
+# Load packages you need
+```{r}
+library(dplyr)
+library(tidyr)
+```
+
+# Constraint
+Read in most recent gnomad table (gnomad v4.1, from gnomad site, constraint downloads (gs://gcp-public-data--gnomad/release/4.1/constraint/gnomad.v4.1.constraint_metrics.ht)), filter to canomical transcripts and filter to only genes with a gene id (this is what we'll match on).
+```{r}
+constraint=read.table('/Users/c1928239/Downloads/gnomad.v4.1.constraint_metrics.tsv', header=T)
+# Filter to canonical transcripts only 
+gene_constraint=subset(constraint, constraint$canonical=='true')
+# Filter to only genes with a gene id (as this is what we'll match on)
+rows_with_ensg <- grep("ENSG", gene_constraint$gene_id, ignore.case = TRUE)
+gene_constraint <- gene_constraint[rows_with_ensg, ]
+constraint<-dplyr::select(gene_constraint, c("gene", "gene_id", "chromosome", "lof.pLI", "lof.oe", "lof.oe_ci.upper"))
+```
+
+## pLI constraint
+```{r}
+constraint$pLI_constrained[constraint$lof.pLI<0.9] <- F 
+constraint$pLI_constrained[constraint$lof.pLI>=0.9] <- T  
+constraint %>% count(pLI_constrained)
+```
+
+# Brain expression
+Uses a table of genes with >5 FPKM in the brain in Supplementary Dataset 1 in Fagerberg et al (https://doi.org/10.1074/mcp.M113.035600).
+```{r}
+brain_exp=read.csv('/Users/c1928239/Downloads/brain_expressed.csv')
+brain_exp$Brain_expressed<-TRUE
+gene_sets<- merge(constraint, brain_exp, by.x='gene_id', by.y='ID', all=T)
+gene_sets$Brain_expressed[is.na(gene_sets$Brain_expressed)]<-FALSE 
+
+gene_sets %>% count(Brain_expressed) # 10,389 genes brain expressed, 9,075 not
+
+```
+
+## Annotate intersects of sets
+```{r}
+# Brain expressed and LoFi
+gene_sets$Brain_expressed_LoFi<-F
+gene_sets$Brain_expressed_LoFi[gene_sets$Brain_expressed==T & gene_sets$pLI_constrained==T] <- T
+gene_sets %>% count(Brain_expressed_LoFi) #2,587 
+
+# Brain expressed and LoF-tol
+gene_sets$Brain_expressed_LoFtol<-F
+gene_sets$Brain_expressed_LoFtol[gene_sets$Brain_expressed==T & gene_sets$pLI_constrained==F] <- T
+gene_sets %>% count(Brain_expressed_LoFtol) #7,224
+
+# Non brain expressed and LoFi
+gene_sets$nonbrain_expressed_LoFi<-F
+gene_sets$nonbrain_expressed_LoFi[gene_sets$Brain_expressed==F & gene_sets$pLI_constrained==T] <- T
+gene_sets %>% count(nonbrain_expressed_LoFi) #578
+
+# Non brain expressed and LoFtol
+gene_sets$nonbrain_expressed_LoFtol<-F
+gene_sets$nonbrain_expressed_LoFtol[gene_sets$Brain_expressed==F & gene_sets$pLI_constrained==F] <- T
+gene_sets %>% count(nonbrain_expressed_LoFtol) #7,749
+
+
+```
+
+
+
+# GWAS genes
+Uses different tables (ST3 and extended data table 1) from Trubetskoy et al (https://doi.org/10.1038/s41586-022-04434-5)
+## All - All genes within 282 loci (from column O of ST3 from PGC3 paper).
+```{r}
+library(biomaRt)
+all_gwas=read.csv('/Users/c1928239/Downloads/pgc3_all_assoc_genes.csv')
+# Separate genes out into rows
+all_gwas_genes <- all_gwas %>%
+  separate_rows(genes_all, sep = ",")  # Split by comma and create a new row for each gene
+all_gwas_genes<-subset(all_gwas_genes, !all_gwas_genes$genes_all=='-') # 2,196 genes in this set 
+# Annotate with id
+ensembl <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+# Extract the gene names (neaten up and capitalise to increase chances of matching to ids!)
+all_gwas_genes$genes_all <- trimws(all_gwas_genes$genes_all)
+all_gwas_genes$genes_all <- toupper(all_gwas_genes$genes_all)
+gene_list <- all_gwas_genes$genes_all 
+# Get ensembl IDs 
+gene_mapping_names <- getBM(
+  attributes = c("external_gene_name", "ensembl_gene_id", "hgnc_symbol"),
+  filters = "external_gene_name",
+  values = gene_list,
+  mart = ensembl
+)
+gene_mapping_synonyms <- getBM(
+  attributes = c("external_synonym", "ensembl_gene_id", "hgnc_symbol"),
+  filters = "external_synonym",
+  values = gene_list,
+  mart = ensembl
+)
+colnames(gene_mapping_synonyms)[colnames(gene_mapping_synonyms) == "external_synonym"] <- "external_gene_name"
+gene_mapping_combined <- rbind(gene_mapping_names, gene_mapping_synonyms)
+# Merge back to the original table  
+all_gwas_genes <- merge(all_gwas_genes, gene_mapping_combined, 
+                        by.x = "genes_all", 
+                        by.y = "external_gene_name", 
+                        all.x = TRUE) # 173 genes don't map, and also some have multiple ids?? 
+# Find genes that were not mapped to an Ensembl ID
+missing_genes <- subset(all_gwas_genes, is.na(all_gwas_genes$ensembl_gene_id))
+print(missing_genes$genes_all)
+#Annotate remaining unmatched by hand if possible (ignoring LOC, LINC, SNOR genes)
+all_gwas_genes$ensembl_gene_id[all_gwas_genes$genes_all=='C10ORF95']<-'ENSG00000120055'
+all_gwas_genes$ensembl_gene_id[all_gwas_genes$genes_all=='C11ORF68']<- 'ENSG00000175573'
+all_gwas_genes$ensembl_gene_id[all_gwas_genes$genes_all=='C12ORF43']<- 'ENSG00000157895'
+all_gwas_genes$ensembl_gene_id[all_gwas_genes$genes_all=='C12ORF76']<- 'ENSG00000174456'
+all_gwas_genes$ensembl_gene_id[all_gwas_genes$genes_all=='C15ORF40']<- 'ENSG00000169609'
+all_gwas_genes$ensembl_gene_id[all_gwas_genes$genes_all=='C16ORF86']<- 'ENSG00000159761'
+all_gwas_genes$ensembl_gene_id[all_gwas_genes$genes_all=='C16ORF92']<- 'ENSG00000167194'
+all_gwas_genes$ensembl_gene_id[all_gwas_genes$genes_all=='C16ORF96']<- 'ENSG00000205832'
+all_gwas_genes$ensembl_gene_id[all_gwas_genes$genes_all=='C1ORF210']<- 'ENSG00000184157'
+all_gwas_genes$ensembl_gene_id[all_gwas_genes$genes_all=='C1ORF216']<- 'ENSG00000142686'
+all_gwas_genes$ensembl_gene_id[all_gwas_genes$genes_all=='C1ORF43']<- 'ENSG00000143612'
+all_gwas_genes$ensembl_gene_id[all_gwas_genes$genes_all=='C1ORF54']<- 'ENSG00000118292'
+all_gwas_genes$ensembl_gene_id[all_gwas_genes$genes_all=='C1ORF56']<- 'ENSG00000143443'
+all_gwas_genes$ensembl_gene_id[all_gwas_genes$genes_all=='C2ORF69']<- 'ENSG00000178074'
+all_gwas_genes$ensembl_gene_id[all_gwas_genes$genes_all=='C3ORF18']<- 'ENSG00000088543'
+all_gwas_genes$ensembl_gene_id[all_gwas_genes$genes_all=='C3ORF49']<- 'ENSG00000163632'
+all_gwas_genes$ensembl_gene_id[all_gwas_genes$genes_all=='C3ORF62']<- 'ENSG00000188315'
+all_gwas_genes$ensembl_gene_id[all_gwas_genes$genes_all=='C3ORF84']<- 'ENSG00000236980'
+# Annotate all as T for being in the set and then annotate to big gene set table 
+all_gwas_genes$SZ_GWAS_gene <- T
+# Count how many genes can be mapped and so are in this set 
+a=subset(all_gwas_genes, !is.na(all_gwas_genes$ensembl_gene_id)) # 2700 genes with ids (but some are duplicates w diff ids)
+b=unique(a$genes_all) # 2,040 diff genes that can be mapped in this set 
+all_gwas_genes=subset(all_gwas_genes, !is.na(all_gwas_genes$ensembl_gene_id))
+
+```
+
+
+## Closest gene 
+```{r}
+closest=read.csv('/Users/c1928239/Downloads/PGC3_closest_gene.csv')
+# Extract the gene names (neaten up and capitalise to increase chances of matching to ids!)
+closest$gene_id <- trimws(closest$gene_id)
+closest$gene_id <- toupper(closest$gene_id)
+gene_list <- closest$gene_id #287 genes 
+# Get ensembl IDs 
+gene_mapping_names <- getBM(
+  attributes = c("external_gene_name", "ensembl_gene_id", "hgnc_symbol"),
+  filters = "external_gene_name",
+  values = gene_list,
+  mart = ensembl
+)
+gene_mapping_synonyms <- getBM(
+  attributes = c("external_synonym", "ensembl_gene_id", "hgnc_symbol"),
+  filters = "external_synonym",
+  values = gene_list,
+  mart = ensembl
+)
+colnames(gene_mapping_synonyms)[colnames(gene_mapping_synonyms) == "external_synonym"] <- "external_gene_name"
+gene_mapping_combined <- rbind(gene_mapping_names, gene_mapping_synonyms)
+# Merge back to the original table  
+closest <- merge(closest, gene_mapping_combined, 
+                        by.x = "gene_id", 
+                        by.y = "external_gene_name", 
+                        all.x = TRUE) 
+# Find genes that were not mapped to an Ensembl ID
+missing_genes <- subset(closest, is.na(closest$ensembl_gene_id))
+print(missing_genes$gene_id)
+#Annotate remaining unmatched by hand if possible
+closest$ensembl_gene_id[closest$gene_id=='C2ORF69']<-'ENSG00000178074'
+# Annotate all as T for being in the set and then annotate to big gene set table 
+closest$SZ_GWAS_closest_indexed_SNP<-T
+# Count how many genes can be mapped and so are in this set 
+a=subset(closest, !is.na(closest$ensembl_gene_id)) # 1140 genes with ids (mostly y rna duplicates which are removed soon!)
+b=unique(a$gene_id) # 222 diff genes that can be mapped in this set 
+closest=subset(closest, !is.na(closest$ensembl_gene_id))
+closest=subset(closest, !(closest$gene_id=='Y_RNA'))
+GWAS=merge(all_gwas_genes, closest, by='ensembl_gene_id', all=T)
+
+```
+
+
+
+
+## Credible causal genes 
+```{r}
+cred_caus=read.csv('/Users/c1928239/Downloads/PGC3_all_prioritised.csv')
+cred_caus$SZ_GWAS_credible_causal <- T
+GWAS=merge(GWAS, cred_caus, by.x='ensembl_gene_id', by.y='id', all=T)
+```
+
+## SMR prioritised
+```{r}
+SMR_prior=read.csv('/Users/c1928239/Downloads/PGC3_SMR_prioritised.csv')
+SMR_prior$SZ_GWAS_SMR_prior <- T
+GWAS=merge(GWAS, SMR_prior, by.x='ensembl_gene_id', by.y='id', all=T)
+
+```
+
+## Fine-map prioritised
+```{r}
+FM_prior=read.csv('/Users/c1928239/Downloads/PGC3_finemap_prioritised.csv')
+FM_prior$SZ_GWAS_Finemap_prior <- T
+GWAS=merge(GWAS, FM_prior, by.x='ensembl_gene_id', by.y='id', all=T)
+
+```
+
+## Merge to a big table w all details 
+```{r}
+gene_sets=merge(gene_sets, GWAS, by.x='gene_id', by.y='ensembl_gene_id', all=T)
+
+```
+
+## Annotate intersects of sets
+```{r}
+# non-prioritised GWAS
+gene_sets$non_prioritised_GWAS<-F
+gene_sets$non_prioritised_GWAS[gene_sets$SZ_GWAS_gene==T & is.na(gene_sets$SZ_GWAS_credible_causal)] <- T
+gene_sets %>% count(non_prioritised_GWAS) # 2,585 
+
+# LoFi minus GWAS credible causal
+gene_sets$LoFi_minus_credible_causal<-F
+gene_sets$LoFi_minus_credible_causal[gene_sets$pLI_constrained==T & is.na(gene_sets$SZ_GWAS_credible_causal)] <- T
+gene_sets %>% count(LoFi_minus_credible_causal) #3,127 
+
+# Brain expressed minus GWAS credible causal
+gene_sets$Brain_expressed_minus_credible_causal<-F
+gene_sets$Brain_expressed_minus_credible_causal[gene_sets$Brain_expressed==T & is.na(gene_sets$SZ_GWAS_credible_causal)] <- T
+gene_sets %>% count(Brain_expressed_minus_credible_causal) #10,311
+
+# Brain expressed minus SMR prioritised GWAS
+gene_sets$Brain_expressed_minus_SMR_prioritised<-F
+gene_sets$Brain_expressed_minus_SMR_prioritised[gene_sets$Brain_expressed==T & is.na(gene_sets$SZ_GWAS_SMR_prior)] <- T
+gene_sets %>% count(Brain_expressed_minus_SMR_prioritised) #10,356
+
+```
+
+# CNV genes
+These gene lists were derived from critical sequence regions in Rees et al (eTable 2, doi:10.1001/jamapsychiatry.2016.1831)
+## NDD CNVS
+```{r}
+ndd_cnvs=read.csv('/Users/c1928239/Downloads/genes_in_NP_CNVs.csv') #1206 genes 
+ndd_cnvs=dplyr::select(ndd_cnvs, c("Genes"))
+# Extract the gene names (neaten up and capitalise to increase chances of matching to ids!)
+ndd_cnvs$Genes <- trimws(ndd_cnvs$Genes)
+ndd_cnvs$Genes  <- toupper(ndd_cnvs$Genes)
+gene_list <- ndd_cnvs$Genes 
+# Get ensembl IDs 
+gene_mapping_names <- getBM(
+  attributes = c("external_gene_name", "ensembl_gene_id", "hgnc_symbol"),
+  filters = "external_gene_name",
+  values = gene_list,
+  mart = ensembl
+)
+gene_mapping_synonyms <- getBM(
+  attributes = c("external_synonym", "ensembl_gene_id", "hgnc_symbol"),
+  filters = "external_synonym",
+  values = gene_list,
+  mart = ensembl
+)
+colnames(gene_mapping_synonyms)[colnames(gene_mapping_synonyms) == "external_synonym"] <- "external_gene_name"
+gene_mapping_combined <- rbind(gene_mapping_names, gene_mapping_synonyms)
+# Merge back to the original table  
+ndd_cnvs <- merge(ndd_cnvs, gene_mapping_combined, 
+                        by.x = "Genes", 
+                        by.y = "external_gene_name", 
+                        all.x = TRUE) # 173 genes don't map, and also some have multiple ids?? 
+# Find genes that were not mapped to an Ensembl ID
+missing_genes <- subset(ndd_cnvs, is.na(ndd_cnvs$ensembl_gene_id))
+print(missing_genes$Genes)
+#Annotate remaining unmatched by hand if possible (ignoring LOC genes)
+ndd_cnvs$ensembl_gene_id[ndd_cnvs$Genes=='C10ORF53']<-'ENSG00000178645'
+ndd_cnvs$ensembl_gene_id[ndd_cnvs$Genes=='C10ORF71']<- 'ENSG00000177354'
+ndd_cnvs$ensembl_gene_id[ndd_cnvs$Genes=='C11ORF96']<- 'ENSG00000187479'
+ndd_cnvs$ensembl_gene_id[ndd_cnvs$Genes=='C15ORF39']<- 'ENSG00000167173'
+ndd_cnvs$ensembl_gene_id[ndd_cnvs$Genes=='C16ORF54']<- 'ENSG00000185905'
+ndd_cnvs$ensembl_gene_id[ndd_cnvs$Genes=='C16ORF92']<- 'ENSG00000167194'
+ndd_cnvs$ensembl_gene_id[ndd_cnvs$Genes=='C17ORF78']<- 'ENSG00000278505'
+ndd_cnvs$ensembl_gene_id[ndd_cnvs$Genes=='C1ORF105']<- 'ENSG00000180999'
+ndd_cnvs$ensembl_gene_id[ndd_cnvs$Genes=='C1ORF159']<- 'ENSG00000131591'
+ndd_cnvs$ensembl_gene_id[ndd_cnvs$Genes=='C22ORF39']<- 'ENSG00000242259'
+ndd_cnvs$ensembl_gene_id[ndd_cnvs$Genes=='C2ORF74']<- 'ENSG00000237651'
+ndd_cnvs$ensembl_gene_id[ndd_cnvs$Genes=='C8ORF74']<- 'ENSG00000171060'
+ndd_cnvs$ensembl_gene_id[ndd_cnvs$Genes=='C9ORF163']<- 'ENSG00000196366'
+ndd_cnvs$ensembl_gene_id[ndd_cnvs$Genes=='PGBD3']<- 'ENSG00000185220'
+ndd_cnvs$ensembl_gene_id[ndd_cnvs$Genes=='SEP-02']<- 'ENSG00000168385'
+ndd_cnvs$ensembl_gene_id[ndd_cnvs$Genes=='SEP-05']<- 'ENSG00000184702'
+
+
+# Annotate all as T for being in the set and then annotate to big gene set table 
+ndd_cnvs$NDD_CNV_gene <- T
+# Count how many genes can be mapped and so are in this set 
+a=subset(ndd_cnvs, !is.na(ndd_cnvs$ensembl_gene_id)) # 1343 genes with ids (but some are duplicates w diff ids)
+b=unique(a$Genes) # 1,111 diff genes that can be mapped in this set 
+ndd_cnvs=subset(ndd_cnvs, !is.na(ndd_cnvs$ensembl_gene_id))
+
+```
+
+## SZ CNVS
+```{r}
+sz_cnvs=read.csv('/Users/c1928239/Downloads/genes_in_SZ_CNVs.csv') #309 genes 
+sz_cnvs=dplyr::select(sz_cnvs, c("Genes_in_SZ_CNVs"))
+# Extract the gene names (neaten up and capitalise to increase chances of matching to ids!)
+sz_cnvs$Genes_in_SZ_CNVs<- trimws(sz_cnvs$Genes_in_SZ_CNVs)
+sz_cnvs$Genes_in_SZ_CNVs  <- toupper(sz_cnvs$Genes_in_SZ_CNVs)
+gene_list <- sz_cnvs$Genes_in_SZ_CNVs
+# Get ensembl IDs 
+gene_mapping_names <- getBM(
+  attributes = c("external_gene_name", "ensembl_gene_id", "hgnc_symbol"),
+  filters = "external_gene_name",
+  values = gene_list,
+  mart = ensembl
+)
+gene_mapping_synonyms <- getBM(
+  attributes = c("external_synonym", "ensembl_gene_id", "hgnc_symbol"),
+  filters = "external_synonym",
+  values = gene_list,
+  mart = ensembl
+)
+colnames(gene_mapping_synonyms)[colnames(gene_mapping_synonyms) == "external_synonym"] <- "external_gene_name"
+gene_mapping_combined <- rbind(gene_mapping_names, gene_mapping_synonyms)
+# Merge back to the original table  
+sz_cnvs <- merge(sz_cnvs, gene_mapping_combined, 
+                  by.x = "Genes_in_SZ_CNVs", 
+                  by.y = "external_gene_name", 
+                  all.x = TRUE) 
+# Find genes that were not mapped to an Ensembl ID
+missing_genes <- subset(sz_cnvs, is.na(sz_cnvs$ensembl_gene_id))
+print(missing_genes$Genes_in_SZ_CNVs)
+#Annotate remaining unmatched by hand if possible (ignoring LOC genes)
+sz_cnvs$ensembl_gene_id[sz_cnvs$Genes_in_SZ_CNVs=='C16ORF54']<-'ENSG00000185905'
+sz_cnvs$ensembl_gene_id[sz_cnvs$Genes_in_SZ_CNVs=='C16ORF92']<- 'ENSG00000167194'
+sz_cnvs$ensembl_gene_id[sz_cnvs$Genes_in_SZ_CNVs=='C22ORF39']<- 'ENSG00000242259'
+
+
+# Annotate all as T for being in the set and then annotate to big gene set table 
+sz_cnvs$SZ_CNV_gene <- T
+# Count how many genes can be mapped and so are in this set 
+a=subset(sz_cnvs, !is.na(sz_cnvs$ensembl_gene_id)) # 346 genes with ids (but some are duplicates w diff ids)
+b=unique(a$Genes_in_SZ_CNVs) # 284 diff genes that can be mapped in this set 
+sz_cnvs=subset(sz_cnvs, !is.na(sz_cnvs$ensembl_gene_id))
+```
+
+
+## Merge!
+```{r}
+CNVs=merge(ndd_cnvs, sz_cnvs, by='ensembl_gene_id', all=T)
+CNVs=dplyr::select(CNVs, c('ensembl_gene_id',"NDD_CNV_gene", "SZ_CNV_gene"))
+gene_sets=merge(gene_sets, CNVs, by.x='gene_id', by.y='ensembl_gene_id', all=T)
+```
+
+## Annotate intersects of sets 
+```{r}
+# Constrained NDD CNVs
+gene_sets$pli_constrained_NDD_CNV_gene<-F
+gene_sets$pli_constrained_NDD_CNV_gene[gene_sets$pLI_constrained==T & gene_sets$NDD_CNV_gene==T] <- T
+gene_sets %>% count(pli_constrained_NDD_CNV_gene) # 153 
+
+# Constrained SZ CNV 
+gene_sets$pli_constrained_SZ_CNV_gene<-F
+gene_sets$pli_constrained_SZ_CNV_gene[gene_sets$pLI_constrained==T & gene_sets$SZ_CNV_gene==T] <- T
+gene_sets %>% count(pli_constrained_SZ_CNV_gene) # 44 
+
+# LoFtol NDD CNVs
+gene_sets$LoFtol_NDD_CNV_gene<-F
+gene_sets$LoFtol_NDD_CNV_gene[gene_sets$pLI_constrained==F & gene_sets$NDD_CNV_gene==T] <- T
+gene_sets %>% count(LoFtol_NDD_CNV_gene) # 771
+
+# LoFtol SZ CNVs
+gene_sets$LoFtol_SZ_CNV_gene<-F
+gene_sets$LoFtol_SZ_CNV_gene[gene_sets$pLI_constrained==F & gene_sets$SZ_CNV_gene==T] <- T
+gene_sets %>% count(LoFtol_SZ_CNV_gene) # 153
+
+# LoFI minus NDD CNVS
+gene_sets$pli_constrained_NOT_NDD_CNV_gene<-F
+gene_sets$pli_constrained_NOT_NDD_CNV_gene[gene_sets$pLI_constrained==T & is.na(gene_sets$NDD_CNV_gene)] <- T
+gene_sets %>% count(pli_constrained_NOT_NDD_CNV_gene) # 3,021
+
+# LoFi minus SZ CNVs
+gene_sets$pli_constrained_NOT_SZ_CNV_gene<-F
+gene_sets$pli_constrained_NOT_SZ_CNV_gene[gene_sets$pLI_constrained==T & is.na(gene_sets$SZ_CNV_gene)] <- T
+gene_sets %>% count(pli_constrained_NOT_SZ_CNV_gene) # 3,130
+
+
+```
+
+
+# SCHEMA genes
+Genes from ST5 of Singh et al (https://doi.org/10.1038/s41586-022-04556-w)
+## GWS
+```{r}
+schema_gws<- c("SETD1A", "CUL1", "XPO7", "TRIO", "CACNA1G", 
+                 "SP4", "GRIA3", "GRIN2A", "HERC1", "RB1CC1")
+schema_gws <- data.frame(Gene = schema_gws)
+gene_list <- schema_gws$Gene
+# Get ensembl IDs 
+gene_mapping_names <- getBM(
+  attributes = c("external_gene_name", "ensembl_gene_id", "hgnc_symbol"),
+  filters = "external_gene_name",
+  values = gene_list,
+  mart = ensembl
+)
+gene_mapping_synonyms <- getBM(
+  attributes = c("external_synonym", "ensembl_gene_id", "hgnc_symbol"),
+  filters = "external_synonym",
+  values = gene_list,
+  mart = ensembl
+)
+colnames(gene_mapping_synonyms)[colnames(gene_mapping_synonyms) == "external_synonym"] <- "external_gene_name"
+gene_mapping_combined <- rbind(gene_mapping_names, gene_mapping_synonyms)
+# Merge back to the original table  
+schema_gws <- merge(schema_gws, gene_mapping_combined, 
+                 by.x = "Gene", 
+                 by.y = "external_gene_name", 
+                 all.x = TRUE) 
+# Find genes that were not mapped to an Ensembl ID
+missing_genes <- subset(schema_gws, is.na(schema_gws$ensembl_gene_id))
+# Annotate all as T for being in the set and then annotate to big gene set table 
+schema_gws$SCHEMA_GWS_gene <- T
+```
+
+## FDR 
+```{r}
+schema_fdr<- c("SETD1A", "CUL1", "XPO7", "TRIO", "CACNA1G", 
+                "SP4", "GRIA3", "GRIN2A", "HERC1", "RB1CC1", 
+                "HCN4", "AKAP11", "ZNF136", "SRRM2", "NR3C2",
+                "ZMYM2", "FAM120A", "FAM178A", "KDM6B", "DNM3",
+                "ASH1L", "STAG1", "HIST1H1E", "PREP", "MAGEC1",
+                "MAGI2", "DAGLA", "OR4P4", "SLC22A11", "ANKRD12",
+                "SV2A", "EIF2S3")
+
+schema_fdr <- data.frame(Gene = schema_fdr)
+gene_list <- schema_fdr$Gene
+# Get ensembl IDs 
+gene_mapping_names <- getBM(
+  attributes = c("external_gene_name", "ensembl_gene_id", "hgnc_symbol"),
+  filters = "external_gene_name",
+  values = gene_list,
+  mart = ensembl
+)
+gene_mapping_synonyms <- getBM(
+  attributes = c("external_synonym", "ensembl_gene_id", "hgnc_symbol"),
+  filters = "external_synonym",
+  values = gene_list,
+  mart = ensembl
+)
+colnames(gene_mapping_synonyms)[colnames(gene_mapping_synonyms) == "external_synonym"] <- "external_gene_name"
+gene_mapping_combined <- rbind(gene_mapping_names, gene_mapping_synonyms)
+# Merge back to the original table  
+schema_fdr <- merge(schema_fdr, gene_mapping_combined, 
+                    by.x = "Gene", 
+                    by.y = "external_gene_name", 
+                    all.x = TRUE) 
+# Find genes that were not mapped to an Ensembl ID
+missing_genes <- subset(schema_fdr, is.na(schema_fdr$ensembl_gene_id))
+# Annotate all as T for being in the set and then annotate to big gene set table 
+schema_fdr$SCHEMA_FDR5_gene <- T
+```
+
+## Merge! 
+```{r}
+schema=merge(schema_fdr, schema_gws, by='ensembl_gene_id', all=T)
+gene_sets=merge(gene_sets, schema, by.x='gene_id', by.y='ensembl_gene_id', all=T)
+```
+
+## Annotate LoFi and SCHEMA together
+```{r}
+# Constrained and SCHEMA 
+gene_sets$pli_constrained_SCHEMA_FDR5_gene<-F
+gene_sets$pli_constrained_SCHEMA_FDR5_gene[gene_sets$pLI_constrained==T & gene_sets$SCHEMA_FDR5_gene==T] <- T
+gene_sets %>% count(pli_constrained_SCHEMA_FDR5_gene) # 21 (but check if any are in X chromosome!!)
+
+a=subset(gene_sets, gene_sets$pli_constrained_SCHEMA_FDR5_gene==T)
+
+# Constrained not SCHEMA
+gene_sets$pli_constrained_NOT_SCHEMA_FDR5_gene<-F
+gene_sets$pli_constrained_NOT_SCHEMA_FDR5_gene[gene_sets$pLI_constrained==T & is.na(gene_sets$SCHEMA_FDR5_gene)] <- T
+gene_sets %>% count(pli_constrained_NOT_SCHEMA_FDR5_gene) #3,153 
+
+
+```
+
+# Write out
+And then copy this on to the RAP! 
+```{r}
+write.csv(gene_sets, '/Users/c1928239/Downloads/gene_sets_for_RAP_Feb25.csv')
+```

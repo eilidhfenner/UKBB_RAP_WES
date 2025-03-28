@@ -1,0 +1,2288 @@
+---
+title: "16_gene_set_regressions"
+output: html_document
+date: "2024-10-01"
+---
+
+# Gene set regressions
+This script reads in phenotypic data and tables of counts per gene set, and then runs regressions on these data. This script runs for <1 hour minutes on a mem1_ssd1_v2_x8 RStudio instance, costing £0.20.
+# Load libraries
+```{r}
+library(data.table)
+library(dplyr)
+library(purrr)
+install.packages('broom')
+library(broom)
+library(ggplot2)
+```
+
+# Prep data
+## Read in cognitive phenotypes
+```{r}
+system('dx download ./phenotype_cohorts/processed_cognition/processed_cog_tests_inc_g_Feb24.csv')
+phen=read.csv('processed_cog_tests_inc_g_Feb24.csv', header=T)
+
+```
+
+## Ancestries
+```{r}
+system('dx download ./genetic_ancestries/app15175_ids/full_dataset_inferred_ancestries.csv')
+ancs_wrongid=read.csv('full_dataset_inferred_ancestries.csv', header=T)
+system('dx download ./genetic_ancestries/app15175_ids/PCAs_*')
+EUR_PCs_wrongid=read.table('PCAs_EUR_only.tsv', header=T)
+AAC_PCs_wrongid=read.table('PCAs_AAC_only.tsv', header=T)
+EAS_PCs_wrongid=read.table('PCAs_EAS_only.tsv', header=T)
+LAT_PCs_wrongid=read.table('PCAs_LAT_only.tsv', header=T)
+SAS_PCs_wrongid=read.table('PCAs_SAS_only.tsv', header=T)
+SSA_PCs_wrongid=read.table('PCAs_SSA_only.tsv', header=T)
+ADM_PCs_wrongid=read.table('PCAs_ADM_only.tsv', header=T)
+
+system('dx download ./phenotype_cohorts/link_AD.app15175_George.app14421_Xav.app17044_JW.app13310.txt')
+link_ids=read.table('link_AD.app15175_George.app14421_Xav.app17044_JW.app13310.txt', header=T)
+ancs=merge(ancs_wrongid, link_ids, by.x='FID', by.y='app15175')
+ancs=merge(ancs, EUR_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+ancs=merge(ancs, AAC_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+ancs=merge(ancs, EAS_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+ancs=merge(ancs, LAT_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+ancs=merge(ancs, SAS_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+ancs=merge(ancs, SSA_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+ancs=merge(ancs, ADM_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+
+# Write out now have correct IDs
+write.csv(ancs, 'ancestries_PCs.csv')
+system('dx upload ancestries_PCs.csv ./genetic_ancestries/')
+
+# Merge 
+phen=merge(phen, ancs, by.x = 'eid', by.y='eid_13310')
+
+```
+
+## QC
+Filter to those passing the final QC stage (sex imputation)
+```{r}
+system('dx download ./WES_QC/discordant_sex_ids.csv')
+ids_to_rm=read.csv('discordant_sex_ids.csv')
+ids_to_rm$remove=T
+
+phen=merge(phen, ids_to_rm, by.x = 'eid', by.y='x', all=T)
+phen=subset(phen, is.na(phen$remove)) 
+
+```
+
+## Covariates
+Read in covariates (and prep for use). These phenotypes were selected in cohort browser and written out using the Table Exporter tool. 
+```{r}
+system('dx download ./phenotype_cohorts/covars_participant.csv')
+covars=read.csv('covars_participant.csv', header=T)
+
+covars$seq_batch<-covars$p32050
+covars$AC_attended<-covars$p54_i0
+covars$sex_1male[covars$p31 == 'Male']<-1
+covars$sex_1male[covars$p31 == 'Female']<-2
+covars$standardised_age <- (covars$p21022 - mean(covars$p21022, na.rm = TRUE)) / sd(covars$p21022, na.rm = TRUE)
+covars$standardised_age_squared<-covars$standardised_age*covars$standardised_age
+covars$sex_standardised_age<-covars$sex_1male * covars$standardised_age
+covars$sex_standardised_age_squared<-covars$sex_1male * covars$standardised_age_squared
+
+
+phen=merge(phen, covars, by.x='eid', by.y='eid')
+
+
+```
+
+## Diagnoses 
+These phenotypes were selected in cohort browser and written out using the Table Exporter tool. 
+```{r}
+system('dx download ./phenotypes_cog_diagnoses_participation_death.csv')
+diagnoses=read.csv('phenotypes_cog_diagnoses_participation_death.csv', header=T)
+
+# Make subset of people diagnosed with SZ - to run these regressions in if powered? 
+sz_diagnosed=subset(diagnoses, diagnoses$SZ==T) 
+sz_diagnosed_eur_only=subset(sz_diagnosed, sz_diagnosed$EUR>0.8)
+
+# Remove people with SZ, ID and/or ASD 
+diagnoses=subset(diagnoses, diagnoses$SZ==F & diagnoses$ASD==F & diagnoses$intellectual_disability==F) 
+diagnoses$no_diagnoses<-T
+diagnoses=diagnoses[,c(3,174)]
+
+phen=merge(phen, diagnoses, by='eid') 
+```
+
+## Phenotype counts across ancs
+```{r}
+all_ancs=phen
+EUR_anc_ids=subset(phen, phen$EUR>0.8)
+AAC_anc_ids=subset(phen, phen$AAC>0.8)
+EAS_anc_ids=subset(phen, phen$EAS>0.8)
+LAT_anc_ids=subset(phen, phen$LAT>0.8)
+SAS_anc_ids=subset(phen, phen$SAS>0.8)
+SSA_anc_ids=subset(phen, phen$SSA>0.8)
+Admixed_anc_ids=subset(phen, (phen$AAC<=0.8 & phen$EAS<=0.8 & 
+                              phen$EUR<=0.8 & phen$LAT<=0.8 & 
+                              phen$SAS<=0.8 & phen$SSA<=0.8))
+
+
+
+# With g
+a=subset(all_ancs, !is.na(all_ancs$g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm))
+a=subset(EUR_anc_ids, !is.na(EUR_anc_ids$g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm))
+a=subset(SAS_anc_ids, !is.na(SAS_anc_ids$g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm))
+a=subset(AAC_anc_ids, !is.na(AAC_anc_ids$g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm))
+a=subset(SSA_anc_ids, !is.na(SSA_anc_ids$g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm))
+a=subset(EAS_anc_ids, !is.na(EAS_anc_ids$g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm))
+a=subset(Admixed_anc_ids, !is.na(Admixed_anc_ids$g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm))
+a=subset(LAT_anc_ids, !is.na(LAT_anc_ids$g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm))
+
+# Numeric memory 
+a=subset(all_ancs, !is.na(all_ancs$Numeric_memory_online_maximum_digits_remembered_Zscore))
+a=subset(EUR_anc_ids, !is.na(EUR_anc_ids$Numeric_memory_online_maximum_digits_remembered_Zscore))
+a=subset(SAS_anc_ids, !is.na(SAS_anc_ids$Numeric_memory_online_maximum_digits_remembered_Zscore))
+a=subset(AAC_anc_ids, !is.na(AAC_anc_ids$Numeric_memory_online_maximum_digits_remembered_Zscore))
+a=subset(SSA_anc_ids, !is.na(SSA_anc_ids$Numeric_memory_online_maximum_digits_remembered_Zscore))
+a=subset(EAS_anc_ids, !is.na(EAS_anc_ids$Numeric_memory_online_maximum_digits_remembered_Zscore))
+a=subset(Admixed_anc_ids, !is.na(Admixed_anc_ids$Numeric_memory_online_maximum_digits_remembered_Zscore))
+a=subset(LAT_anc_ids, !is.na(LAT_anc_ids$Numeric_memory_online_maximum_digits_remembered_Zscore))
+
+# Pairs matching
+a=subset(all_ancs, !is.na(all_ancs$Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm))
+a=subset(EUR_anc_ids, !is.na(EUR_anc_ids$Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm))
+a=subset(SAS_anc_ids, !is.na(SAS_anc_ids$Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm))
+a=subset(AAC_anc_ids, !is.na(AAC_anc_ids$Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm))
+a=subset(SSA_anc_ids, !is.na(SSA_anc_ids$Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm))
+a=subset(EAS_anc_ids, !is.na(EAS_anc_ids$Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm))
+a=subset(Admixed_anc_ids, !is.na(Admixed_anc_ids$Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm))
+a=subset(LAT_anc_ids, !is.na(LAT_anc_ids$Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm))
+
+# Reaction time
+a=subset(all_ancs, !is.na(all_ancs$Reaction_time_AC1_mean_time_taken_Zscore_outliersrm))
+a=subset(EUR_anc_ids, !is.na(EUR_anc_ids$Reaction_time_AC1_mean_time_taken_Zscore_outliersrm))
+a=subset(SAS_anc_ids, !is.na(SAS_anc_ids$Reaction_time_AC1_mean_time_taken_Zscore_outliersrm))
+a=subset(AAC_anc_ids, !is.na(AAC_anc_ids$Reaction_time_AC1_mean_time_taken_Zscore_outliersrm))
+a=subset(SSA_anc_ids, !is.na(SSA_anc_ids$Reaction_time_AC1_mean_time_taken_Zscore_outliersrm))
+a=subset(EAS_anc_ids, !is.na(EAS_anc_ids$Reaction_time_AC1_mean_time_taken_Zscore_outliersrm))
+a=subset(Admixed_anc_ids, !is.na(Admixed_anc_ids$Reaction_time_AC1_mean_time_taken_Zscore_outliersrm))
+a=subset(LAT_anc_ids, !is.na(LAT_anc_ids$Reaction_time_AC1_mean_time_taken_Zscore_outliersrm))
+
+
+# TMTB
+a=subset(all_ancs, !is.na(all_ancs$TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm))
+a=subset(EUR_anc_ids, !is.na(EUR_anc_ids$TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm))
+a=subset(SAS_anc_ids, !is.na(SAS_anc_ids$TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm))
+a=subset(AAC_anc_ids, !is.na(AAC_anc_ids$TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm))
+a=subset(SSA_anc_ids, !is.na(SSA_anc_ids$TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm))
+a=subset(EAS_anc_ids, !is.na(EAS_anc_ids$TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm))
+a=subset(Admixed_anc_ids, !is.na(Admixed_anc_ids$TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm))
+a=subset(LAT_anc_ids, !is.na(LAT_anc_ids$TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm))
+
+# FI
+a=subset(all_ancs, !is.na(all_ancs$FI_AC1_n_correct_answers_Zscore))
+a=subset(EUR_anc_ids, !is.na(EUR_anc_ids$FI_AC1_n_correct_answers_Zscore))
+a=subset(SAS_anc_ids, !is.na(SAS_anc_ids$FI_AC1_n_correct_answers_Zscore))
+a=subset(AAC_anc_ids, !is.na(AAC_anc_ids$FI_AC1_n_correct_answers_Zscore))
+a=subset(SSA_anc_ids, !is.na(SSA_anc_ids$FI_AC1_n_correct_answers_Zscore))
+a=subset(EAS_anc_ids, !is.na(EAS_anc_ids$FI_AC1_n_correct_answers_Zscore))
+a=subset(Admixed_anc_ids, !is.na(Admixed_anc_ids$FI_AC1_n_correct_answers_Zscore))
+a=subset(LAT_anc_ids, !is.na(LAT_anc_ids$FI_AC1_n_correct_answers_Zscore))
+
+# SDS
+a=subset(all_ancs, !is.na(all_ancs$SDS_online1_n_correct_cons_attempts_Zscore_outliersrm))
+a=subset(EUR_anc_ids, !is.na(EUR_anc_ids$SDS_online1_n_correct_cons_attempts_Zscore_outliersrm))
+a=subset(SAS_anc_ids, !is.na(SAS_anc_ids$SDS_online1_n_correct_cons_attempts_Zscore_outliersrm))
+a=subset(AAC_anc_ids, !is.na(AAC_anc_ids$SDS_online1_n_correct_cons_attempts_Zscore_outliersrm))
+a=subset(SSA_anc_ids, !is.na(SSA_anc_ids$SDS_online1_n_correct_cons_attempts_Zscore_outliersrm))
+a=subset(EAS_anc_ids, !is.na(EAS_anc_ids$SDS_online1_n_correct_cons_attempts_Zscore_outliersrm))
+a=subset(Admixed_anc_ids, !is.na(Admixed_anc_ids$SDS_online1_n_correct_cons_attempts_Zscore_outliersrm))
+a=subset(LAT_anc_ids, !is.na(LAT_anc_ids$SDS_online1_n_correct_cons_attempts_Zscore_outliersrm))
+
+
+# TMTA
+a=subset(all_ancs, !is.na(all_ancs$TMTA_online1_time_to_complete_numeric_path_Zscore_outliersrm))
+a=subset(EUR_anc_ids, !is.na(EUR_anc_ids$TMTA_online1_time_to_complete_numeric_path_Zscore_outliersrm))
+a=subset(SAS_anc_ids, !is.na(SAS_anc_ids$TMTA_online1_time_to_complete_numeric_path_Zscore_outliersrm))
+a=subset(AAC_anc_ids, !is.na(AAC_anc_ids$TMTA_online1_time_to_complete_numeric_path_Zscore_outliersrm))
+a=subset(SSA_anc_ids, !is.na(SSA_anc_ids$TMTA_online1_time_to_complete_numeric_path_Zscore_outliersrm))
+a=subset(EAS_anc_ids, !is.na(EAS_anc_ids$TMTA_online1_time_to_complete_numeric_path_Zscore_outliersrm))
+a=subset(Admixed_anc_ids, !is.na(Admixed_anc_ids$TMTA_online1_time_to_complete_numeric_path_Zscore_outliersrm))
+a=subset(LAT_anc_ids, !is.na(LAT_anc_ids$TMTA_online1_time_to_complete_numeric_path_Zscore_outliersrm))
+
+# Prospective mem
+a=subset(all_ancs, !is.na(all_ancs$prospective_mem_AC1))
+a=subset(EUR_anc_ids, !is.na(EUR_anc_ids$prospective_mem_AC1))
+a=subset(SAS_anc_ids, !is.na(SAS_anc_ids$prospective_mem_AC1))
+a=subset(AAC_anc_ids, !is.na(AAC_anc_ids$prospective_mem_AC1))
+a=subset(SSA_anc_ids, !is.na(SSA_anc_ids$prospective_mem_AC1))
+a=subset(EAS_anc_ids, !is.na(EAS_anc_ids$prospective_mem_AC1))
+a=subset(Admixed_anc_ids, !is.na(Admixed_anc_ids$prospective_mem_AC1))
+a=subset(LAT_anc_ids, !is.na(LAT_anc_ids$prospective_mem_AC1))
+
+# Other gs 
+a=subset(all_ancs, !is.na(all_ancs$g_LOO_RT_TMTB_NM_zscore_outliersrm))
+a=subset(all_ancs, !is.na(all_ancs$g_LOO_RT_NM_PM_zscore_outliersrm))
+a=subset(all_ancs, !is.na(all_ancs$g_LOO_TMTB_NM_PM_zscore_outliersrm))
+a=subset(all_ancs, !is.na(all_ancs$g_LOO_TMTB_NM_RT_zscore_outliersrm))
+a=subset(all_ancs, !is.na(all_ancs$g_inc_FI_zscore_outliersrm))
+a=subset(all_ancs, !is.na(all_ancs$g_UKB5_FRD_zscore_outliersrm.y))
+
+```
+
+# Correlations
+## Between cog tests
+```{r}
+cog_tests_for_correlations<- all_ancs[,c('g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm', 
+                                         'Numeric_memory_online_maximum_digits_remembered_Zscore',  
+                                         'Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm',
+                                         'Reaction_time_AC1_mean_time_taken_Zscore_outliersrm',
+                                         'TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm',
+                                         'FI_AC1_n_correct_answers_Zscore',
+                                         'SDS_online1_n_correct_cons_attempts_Zscore_outliersrm',
+                                         'TMTA_online1_time_to_complete_numeric_path_Zscore_outliersrm'
+                                         )]
+
+correlations <- cor(cog_tests_for_correlations, use="pairwise.complete.obs")
+```
+
+## Of different gs 
+```{r}
+gs_for_correlations<- all_ancs[,c('g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm', 
+                                         'g_LOO_RT_TMTB_NM_zscore_outliersrm',  
+                                         'g_LOO_RT_NM_PM_zscore_outliersrm',
+                                         'g_LOO_TMTB_NM_PM_zscore_outliersrm',
+                                         'g_LOO_TMTB_NM_RT_zscore_outliersrm',
+                                         'g_inc_FI_zscore_outliersrm',
+                                         'g_UKB5_FRD_zscore_outliersrm.y'
+                                         )]
+
+correlations <- cor(gs_for_correlations, use="pairwise.complete.obs")
+```
+
+
+# Get counts
+```{r}
+AC='5orless'
+system('dx download ./Variant_counts/Gene_sets/*_AC5orless_*.csv --overwrite')
+
+# REMOVE SINGLE GENE TABLES HERE!!
+file_list <- list.files(path = "./", pattern = "*_AC5orless_counts.csv", full.names = TRUE)
+
+# Read, drop first column (V1), and merge each file
+counts <- lapply(file_list, function(file) {
+  data <- fread(file)  # Read the file
+  data[, V1 := NULL]  # Drop the first column (V1)
+  return(data)
+}) %>%
+reduce(function(x, y) merge(x, y, by = "Sample_ID", all = TRUE))  # Merge the data frames
+
+
+all_ancs=merge(phen, counts, by.x='eid', by.y='Sample_ID') 
+EU_ancs=subset(all_ancs, all_ancs$EUR>0.8) 
+AAC_ancs=subset(all_ancs, all_ancs$AAC>0.8)
+EAS_ancs=subset(all_ancs, all_ancs$EAS>0.8)
+LAT_ancs=subset(all_ancs, all_ancs$LAT>0.8)
+SAS_ancs=subset(all_ancs, all_ancs$SAS>0.8)
+SSA_ancs=subset(all_ancs, all_ancs$SSA>0.8)
+ADM_ancs=subset(all_ancs, (all_ancs$AAC<=0.8 & all_ancs$EAS<=0.8 & 
+                              all_ancs$EUR<=0.8 & all_ancs$LAT<=0.8 & 
+                              all_ancs$SAS<=0.8 & all_ancs$SSA<=0.8))
+
+
+
+```
+
+
+## EUR ancs regression (MAC5)
+### Set covars 
+```{r}
+covars_Eu_anc_NS <- 'seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + sex_standardised_age + sex_standardised_age_squared + synonymous_AC5orless_exome_wide_total + AAC + EAS + LAT + SAS + EU_PC1 + EU_PC2 + EU_PC3 + EU_PC4 + EU_PC5 + EU_PC6 + EU_PC7 + EU_PC8 + EU_PC9 + EU_PC10' # SSA removed here as no one defined as EUR anc has a non-zero SSA probability. 
+
+covars_Eu_anc_syn <- 'seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + sex_standardised_age + sex_standardised_age_squared + AAC + EAS + LAT + SAS + EU_PC1 + EU_PC2 + EU_PC3 + EU_PC4 + EU_PC5 + EU_PC6 + EU_PC7 + EU_PC8 + EU_PC9 + EU_PC10'
+```
+
+### Prep results table 
+```{r}
+results <- data.frame(
+  gene_set=character(),
+  dep_var = character(),
+  indep_var = character(),
+  allele_count = numeric(),
+  beta = numeric(),
+  SE = numeric(),
+  lower_CI = numeric(),
+  upper_CI = numeric(),
+  p_value = numeric(),
+  n_vars = integer(),
+  n_people = integer(),
+  ancestry=character(),
+  stringsAsFactors = FALSE
+)
+```
+
+### Distribution of RCVs
+#### In LoFi genes 
+Supplementary Table.
+```{r}
+a=subset(EU_ancs, !is.na(EU_ancs$g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm)) #75,188
+
+a %>% count(PTV_AC5orless_pLI_0.9_total)
+a %>% count(REVEL75_Miss_AC5orless_pLI_0.9_total)
+a %>% count(synonymous_AC5orless_pLI_0.9_total)
+
+b = subset(a, a$synonymous_AC5orless_pLI_0.9_total > 5)
+
+```
+
+
+#### compared to g 
+Supplementary Figure 3
+```{r}
+# Combine data for all variant classes into a single data frame
+summaryPTVS <- a %>%
+  group_by(PTV_AC5orless_pLI_0.9_total) %>%
+  summarise(
+    mean_g = mean(g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm),
+    se = sd(g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm) / sqrt(n()),
+    variant_class = "PTVs"
+  )
+
+summaryMissPathogenic <- a %>%
+  group_by(REVEL75_Miss_AC5orless_pLI_0.9_total) %>%
+  summarise(
+    mean_g = mean(g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm),
+    se = sd(g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm) / sqrt(n()),
+    variant_class = "Deleterious missense"
+  )
+
+summarySynonymous <- a %>%
+  group_by(synonymous_AC5orless_pLI_0.9_total) %>%
+  summarise(
+    mean_g = mean(g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm),
+    se = sd(g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm) / sqrt(n()),
+    variant_class = "Synonymous"
+  )
+
+# Combine all summaries into one data frame
+combined_summary <- bind_rows(
+  summaryPTVS %>% rename(n_variants = PTV_AC5orless_pLI_0.9_total),
+  summaryMissPathogenic %>% rename(n_variants = REVEL75_Miss_AC5orless_pLI_0.9_total),
+  summarySynonymous %>% rename(n_variants = synonymous_AC5orless_pLI_0.9_total)
+)
+
+# Reorder factor levels for variant_class
+combined_summary$variant_class <- factor(
+  combined_summary$variant_class,
+  levels = c("PTVs", "Deleterious missense", "Synonymous")
+)
+
+# Drop synonymous here as we dont want to plot this 
+combined_summary=subset(combined_summary, combined_summary$variant_class!='Synonymous')
+
+# Plot all variant classes in one graph
+tiff("combined_variant_classes_by_g_means_SEs.tiff", units="in", width=15, height=10, res=400)
+ggplot(combined_summary, aes(x = n_variants, y = mean_g, color = variant_class)) +
+  geom_point(stat = "identity", position = position_dodge(width = 0.6), size = 6) +
+  geom_errorbar(aes(ymin = mean_g - se, ymax = mean_g + se),position = position_dodge(width = 0.6), width = 0.2) +
+  labs(x = '\n n rare variants in LoFi genes carried \n', 
+       y = expression("Mean " * italic("g") * " score"),
+       color = "Variant Class") +
+  theme_minimal() +
+  geom_hline(yintercept = 0, linetype = 'dashed', color = 'gray') +
+  theme(text = element_text(size = 35))+
+  xlim(-0.5,3.5)+
+  ylim(-0.35, 0.05)+
+  theme(legend.position="bottom")
+dev.off()
+````
+
+
+### Rates of RCVs across ancestries 
+Supplementary Table 4
+```{r}
+all_ancs$anc<-'UNK'
+all_ancs$anc[all_ancs$AAC>0.8]<- 'AAC'
+all_ancs$anc[all_ancs$EAS>0.8]<- 'EAS'
+all_ancs$anc[all_ancs$EUR>0.8]<- 'EUR'
+all_ancs$anc[all_ancs$LAT>0.8]<- 'LAT'
+all_ancs$anc[all_ancs$SAS>0.8]<- 'SAS'
+all_ancs$anc[all_ancs$SSA>0.8]<- 'SSA'
+
+all_ancs%>%count(anc)
+
+summary_ancs <- all_ancs %>%
+  group_by(anc) %>%
+  summarise(
+    #Exome wide
+    mean_EW_PTVs = mean(PTV_AC5orless_exome_wide_total, na.rm = TRUE),
+    se_EW_PTVs = sd(PTV_AC5orless_exome_wide_total, na.rm = TRUE) / sqrt(n()),
+    
+    mean_EW_pathogenic_missense = mean(REVEL75_Miss_AC5orless_exome_wide_total, na.rm = TRUE),
+    se_EW_pathogenic_missense = sd(REVEL75_Miss_AC5orless_exome_wide_total, na.rm = TRUE) / sqrt(n()),
+    
+    mean_EW_intermediate_missense = mean(REVEL75to50_Miss_AC5orless_exome_wide_total, na.rm = TRUE),
+    se_EW_intermediate_missense = sd(REVEL75to50_Miss_AC5orless_exome_wide_total, na.rm = TRUE) / sqrt(n()),
+    
+    mean_EW_benign_missense = mean(REVEL50orless_Miss_AC5orless_exome_wide_total, na.rm = TRUE),
+    se_EW_benign_missense = sd(REVEL50orless_Miss_AC5orless_exome_wide_total, na.rm = TRUE) / sqrt(n()),
+    
+    mean_EW_synonymous = mean(synonymous_AC5orless_exome_wide_total, na.rm = TRUE),
+    se_EW_synonymous = sd(synonymous_AC5orless_exome_wide_total, na.rm = TRUE) / sqrt(n()),
+    
+    # LoFi
+    mean_LoFi_PTVs = mean(PTV_AC5orless_pLI_0.9_total, na.rm = TRUE),
+    se_LoFi_PTVs = sd(PTV_AC5orless_pLI_0.9_total, na.rm = TRUE) / sqrt(n()),
+    
+    mean_LoFi_pathogenic_missense = mean(REVEL75_Miss_AC5orless_pLI_0.9_total, na.rm = TRUE),
+    se_LoFi_pathogenic_missense = sd(REVEL75_Miss_AC5orless_pLI_0.9_total, na.rm = TRUE) / sqrt(n()),
+    
+    mean_LoFi_intermediate_missense = mean(REVEL75to50_Miss_AC5orless_pLI_0.9_total, na.rm = TRUE),
+    se_LoFi_intermediate_missense = sd(REVEL75to50_Miss_AC5orless_pLI_0.9_total, na.rm = TRUE) / sqrt(n()),
+    
+    mean_LoFi_benign_missense = mean(REVEL50orless_Miss_AC5orless_pLI_0.9_total, na.rm = TRUE),
+    se_LoFi_benign_missense = sd(REVEL50orless_Miss_AC5orless_pLI_0.9_total, na.rm = TRUE) / sqrt(n()),
+    
+    mean_LoFi_synonymous = mean(synonymous_AC5orless_pLI_0.9_total, na.rm = TRUE),
+    se_LoFi_synonymous = sd(synonymous_AC5orless_pLI_0.9_total, na.rm = TRUE) / sqrt(n())
+  )
+
+  write.csv(summary_ancs, 'summary_ratesacrossancs.csv')
+
+summary_all_ancs <- all_ancs %>%
+  summarise(
+    #Exome wide
+    mean_EW_PTVs = mean(PTV_AC5orless_exome_wide_total, na.rm = TRUE),
+    se_EW_PTVs = sd(PTV_AC5orless_exome_wide_total, na.rm = TRUE) / sqrt(n()),
+    
+    mean_EW_pathogenic_missense = mean(REVEL75_Miss_AC5orless_exome_wide_total, na.rm = TRUE),
+    se_EW_pathogenic_missense = sd(REVEL75_Miss_AC5orless_exome_wide_total, na.rm = TRUE) / sqrt(n()),
+    
+    mean_EW_intermediate_missense = mean(REVEL75to50_Miss_AC5orless_exome_wide_total, na.rm = TRUE),
+    se_EW_intermediate_missense = sd(REVEL75to50_Miss_AC5orless_exome_wide_total, na.rm = TRUE) / sqrt(n()),
+    
+    mean_EW_benign_missense = mean(REVEL50orless_Miss_AC5orless_exome_wide_total, na.rm = TRUE),
+    se_EW_benign_missense = sd(REVEL50orless_Miss_AC5orless_exome_wide_total, na.rm = TRUE) / sqrt(n()),
+    
+    mean_EW_synonymous = mean(synonymous_AC5orless_exome_wide_total, na.rm = TRUE),
+    se_EW_synonymous = sd(synonymous_AC5orless_exome_wide_total, na.rm = TRUE) / sqrt(n()),
+    
+    # LoFi
+    mean_LoFi_PTVs = mean(PTV_AC5orless_pLI_0.9_total, na.rm = TRUE),
+    se_LoFi_PTVs = sd(PTV_AC5orless_pLI_0.9_total, na.rm = TRUE) / sqrt(n()),
+    
+    mean_LoFi_pathogenic_missense = mean(REVEL75_Miss_AC5orless_pLI_0.9_total, na.rm = TRUE),
+    se_LoFi_pathogenic_missense = sd(REVEL75_Miss_AC5orless_pLI_0.9_total, na.rm = TRUE) / sqrt(n()),
+    
+    mean_LoFi_intermediate_missense = mean(REVEL75to50_Miss_AC5orless_pLI_0.9_total, na.rm = TRUE),
+    se_LoFi_intermediate_missense = sd(REVEL75to50_Miss_AC5orless_pLI_0.9_total, na.rm = TRUE) / sqrt(n()),
+    
+    mean_LoFi_benign_missense = mean(REVEL50orless_Miss_AC5orless_pLI_0.9_total, na.rm = TRUE),
+    se_LoFi_benign_missense = sd(REVEL50orless_Miss_AC5orless_pLI_0.9_total, na.rm = TRUE) / sqrt(n()),
+    
+    mean_LoFi_synonymous = mean(synonymous_AC5orless_pLI_0.9_total, na.rm = TRUE),
+    se_LoFi_synonymous = sd(synonymous_AC5orless_pLI_0.9_total, na.rm = TRUE) / sqrt(n())
+  )
+
+
+```
+
+
+
+### Regress!!
+#### Non-synonymous vars 
+##### Set variables 
+```{r}
+sets <- list('exome_wide',
+             'pLI_0.9','non_constrained_pLI_lessthan0.9',
+             'brain_expressed_LoFi', 'brain_expressed_LoFtolerant',
+             'brain_expressed','non_brain_expressed',
+             'non_brain_expressed_LoFi','non_brain_expressed_LoFtolerant',
+             'SZ_GWAS_all', 'SZ_GWAS_closest', 'SZ_GWAS_credible_causal_US','non_prioritised_GWAS', 
+             'Brain_expressed_minus_credible_causal_GWAS','Brain_expressed_minus_SMR_prioritised_GWAS',
+             'Finemap_prioritised_GWAS','SMR_prioritised_GWAS',
+             'LoFi_minus_credible_causal_GWAS', 
+             'NDD_CNVs_US', 'SZ_CNVs_US',
+             'LoFi_in_NDD_CNVs_US', 'LoFi_in_SZ_CNVs_US',
+             'LoFtolerant_in_NDD_CNVs_US','LoFtolerant_in_SZ_CNVs_US',
+             'LoFi_minus_NDD_CNVs_US','LoFi_minus_SZ_CNVs_US',
+             'SCHEMA_FDR_US', 'LoFi_and_SCHEMA_FDR_US','LoFi_minus_SCHEMA_FDR_US')
+var_types<-list('PTV', 'REVEL75_Miss')
+dependent_var<-list('g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm')
+
+```
+
+### Regress main sets!
+```{r}
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_NS))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+
+```
+
+
+### Synonymous vars  
+#### Set variables 
+```{r}
+var_types<-list('synonymous')
+
+```
+
+#### Regress
+```{r}
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_syn))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+```
+
+
+
+###  Sex stratified regression
+#### Males 
+##### Non-synonymous vars 
+###### Set variables 
+```{r}
+sets <- list('pLI_0.9')
+var_types<-list('PTV', 'REVEL75_Miss')
+
+alldata=EU_ancs
+EU_ancs=subset(EU_ancs, EU_ancs$sex_1male==1)
+```
+
+###### Regress
+```{r}
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_NS))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only_males'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+
+```
+
+
+##### Synonymous vars  
+###### Set variables 
+```{r}
+var_types<-list('synonymous')
+
+```
+
+###### Regress
+```{r}
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_syn))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only_males'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+```
+
+#### Females 
+##### Non-synonymous vars 
+###### Set variables 
+```{r}
+var_types<-list('PTV', 'REVEL75_Miss')
+
+EU_ancs=alldata
+EU_ancs=subset(EU_ancs, EU_ancs$sex_1male==2)
+```
+
+###### Regress
+```{r}
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_NS))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only_females'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+
+```
+
+
+#### Synonymous vars  
+##### Set variables 
+```{r}
+var_types<-list('synonymous')
+
+```
+
+##### Regress
+```{r}
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_syn))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only_females'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+```
+
+
+
+#### Write out results in case of crashes 
+At this stage all ancs only but when EU PCs are ready, rerun and write out all results. 
+```{r}
+write.csv(results, 'results_g_regressions_AC5orless_diagnosesrm_incSE_Eurancs_Feb25_midway.csv')
+system('dx upload results_g_regressions_AC5orless_diagnosesrm_incSE_Eurancs_Feb25_midway.csv --destination ./Variant_counts/Gene_sets/')
+```
+
+
+### Regress covarying for cognitive tests!! 
+Just do this for lofi genes!
+```{r}
+sets <- list('pLI_0.9')
+
+EU_ancs=alldata
+
+```
+
+#### g as outcome 
+```{r}
+dependent_var<-list('g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm')
+
+```
+##### Covarying for FI 
+```{r}
+var_types<-list('PTV', 'REVEL75_Miss')
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_NS, "+ FI_AC1_n_correct_answers_Zscore"))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]) & !is.na(EU_ancs$FI_AC1_n_correct_answers_Zscore))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only_covar_FI_AC1_n_correct_answers_Zscore'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+
+
+var_types<-list('synonymous')
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_syn, "+ FI_AC1_n_correct_answers_Zscore"))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]) & !is.na(EU_ancs$FI_AC1_n_correct_answers_Zscore))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only_covar_FI_AC1_n_correct_answers_Zscore'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+```
+
+##### Covarying for SDS
+```{r}
+var_types<-list('PTV', 'REVEL75_Miss')
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_NS, "+ SDS_online1_n_correct_cons_attempts_Zscore_outliersrm"))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]) & !is.na(EU_ancs$SDS_online1_n_correct_cons_attempts_Zscore_outliersrm))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only_covar_SDS_online1_n_correct_cons_attempts_Zscore_outliersrm'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+
+
+var_types<-list('synonymous')
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_syn, "+ SDS_online1_n_correct_cons_attempts_Zscore_outliersrm"))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]) & !is.na(EU_ancs$SDS_online1_n_correct_cons_attempts_Zscore_outliersrm))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only_covar_SDS_online1_n_correct_cons_attempts_Zscore_outliersrm'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+```
+
+##### Covarying for TMTA
+```{r}
+var_types<-list('PTV', 'REVEL75_Miss')
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_NS, "+ TMTA_online1_time_to_complete_numeric_path_Zscore_outliersrm"))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]) & !is.na(EU_ancs$TMTA_online1_time_to_complete_numeric_path_Zscore_outliersrm))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only_covar_TMTA_online1_time_to_complete_numeric_path_Zscore_outliersrm'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+
+
+var_types<-list('synonymous')
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_syn, "+ TMTA_online1_time_to_complete_numeric_path_Zscore_outliersrm"))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]) & !is.na(EU_ancs$TMTA_online1_time_to_complete_numeric_path_Zscore_outliersrm))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only_covar_TMTA_online1_time_to_complete_numeric_path_Zscore_outliersrm'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+```
+
+##### Covarying for NM
+```{r}
+var_types<-list('PTV', 'REVEL75_Miss')
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_NS, "+ Numeric_memory_online_maximum_digits_remembered_Zscore"))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]) & !is.na(EU_ancs$Numeric_memory_online_maximum_digits_remembered_Zscore))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only_covar_Numeric_memory_online_maximum_digits_remembered_Zscore'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+
+
+var_types<-list('synonymous')
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_syn, "+ Numeric_memory_online_maximum_digits_remembered_Zscore"))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]) & !is.na(EU_ancs$Numeric_memory_online_maximum_digits_remembered_Zscore))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only_covar_Numeric_memory_online_maximum_digits_remembered_Zscore'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+```
+
+##### Covarying for RT
+```{r}
+var_types<-list('PTV', 'REVEL75_Miss')
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_NS, "+ Reaction_time_AC1_mean_time_taken_Zscore_outliersrm"))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]) & !is.na(EU_ancs$Reaction_time_AC1_mean_time_taken_Zscore_outliersrm))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only_covar_Reaction_time_AC1_mean_time_taken_Zscore_outliersrm'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+
+
+var_types<-list('synonymous')
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_syn, "+ Reaction_time_AC1_mean_time_taken_Zscore_outliersrm"))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]) & !is.na(EU_ancs$Reaction_time_AC1_mean_time_taken_Zscore_outliersrm))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only_covar_Reaction_time_AC1_mean_time_taken_Zscore_outliersrm'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+```
+
+##### Covarying for PM
+```{r}
+var_types<-list('PTV', 'REVEL75_Miss')
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_NS, "+ Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm"))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]) & !is.na(EU_ancs$Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only_covar_Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+
+
+var_types<-list('synonymous')
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_syn, "+ Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm"))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]) & !is.na(EU_ancs$Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only_covar_Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+```
+
+##### Covarying for TMTB
+```{r}
+var_types<-list('PTV', 'REVEL75_Miss')
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_NS, "+ TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm"))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]) & !is.na(EU_ancs$TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only_covar_TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+
+
+var_types<-list('synonymous')
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_syn, "+ TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm"))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]) & !is.na(EU_ancs$TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only_covar_TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+```
+
+#### Other outcomes 
+##### FI
+```{r}
+dependent_var<-list('FI_AC1_n_correct_answers_Zscore', 
+                    'SDS_online1_n_correct_cons_attempts_Zscore_outliersrm' , 
+                    'TMTA_online1_time_to_complete_numeric_path_Zscore_outliersrm')
+
+EU_ancs=subset(EU_ancs, !is.na(EU_ancs$g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm))
+
+```
+##### Just usual covariates
+```{r}
+var_types<-list('PTV', 'REVEL75_Miss')
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_NS))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+
+
+var_types<-list('synonymous')
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_syn))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+```
+
+##### Usual covars plus g
+```{r}
+var_types<-list('PTV', 'REVEL75_Miss')
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_NS, "+ g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm"))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]) & !is.na(EU_ancs$g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only_covar_g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+
+
+var_types<-list('synonymous')
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_syn, '+ g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm'))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]) & !is.na(EU_ancs$g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only_covar_g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+```
+
+
+## Other anc regressions
+```{r}
+sets <- list('pLI_0.9')
+dependent_var<-list('g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm')
+```
+
+### AAC regression
+```{r}
+var_types<-list('PTV', 'REVEL75_Miss')
+
+covars_AAC_ancs_NS <- 'seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + sex_standardised_age + sex_standardised_age_squared + synonymous_AC5orless_exome_wide_total + AAC + EAS + LAT + SAS + SSA + AAC_PC1 + AAC_PC2 + AAC_PC3 + AAC_PC4 + AAC_PC5 + AAC_PC6 + AAC_PC7 + AAC_PC8 + AAC_PC9 + AAC_PC10' 
+
+covars_AAC_ancs_syn <- 'seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + sex_standardised_age + sex_standardised_age_squared + AAC + EAS + LAT + SAS + SSA + AAC_PC1 + AAC_PC2 + AAC_PC3 + AAC_PC4 + AAC_PC5 + AAC_PC6 + AAC_PC7 + AAC_PC8 + AAC_PC9 + AAC_PC10' 
+
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_AAC_ancs_NS))
+      model <- lm(formula, data = AAC_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(AAC_ancs, !is.na(AAC_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'AAC_ancs'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+
+
+var_types<-list('synonymous')
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_AAC_ancs_syn))
+      model <- lm(formula, data = AAC_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(AAC_ancs, !is.na(AAC_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'AAC_ancs'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+```
+
+### EAS regression
+```{r}
+var_types<-list('PTV', 'REVEL75_Miss')
+
+covars_EAS_ancs_NS <- 'seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + sex_standardised_age + sex_standardised_age_squared + synonymous_AC5orless_exome_wide_total + AAC + EAS + LAT + SAS + SSA + EAS_PC1 + EAS_PC2 + EAS_PC3 + EAS_PC4 + EAS_PC5 + EAS_PC6 + EAS_PC7 + EAS_PC8 + EAS_PC9 + EAS_PC10' 
+
+covars_EAS_ancs_syn <- 'seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + sex_standardised_age + sex_standardised_age_squared + AAC + EAS + LAT + SAS + SSA + EAS_PC1 + EAS_PC2 + EAS_PC3 + EAS_PC4 + EAS_PC5 + EAS_PC6 + EAS_PC7 + EAS_PC8 + EAS_PC9 + EAS_PC10' 
+
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_EAS_ancs_NS))
+      model <- lm(formula, data = EAS_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EAS_ancs, !is.na(EAS_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EAS_ancs'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+
+
+var_types<-list('synonymous')
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_EAS_ancs_syn))
+      model <- lm(formula, data = EAS_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EAS_ancs, !is.na(EAS_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EAS_ancs'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+```
+
+
+### LAT regression
+```{r}
+var_types<-list('PTV', 'REVEL75_Miss')
+
+covars_LAT_ancs_NS <- 'seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + sex_standardised_age + sex_standardised_age_squared + synonymous_AC5orless_exome_wide_total + AAC + EAS + LAT + SAS + SSA + LAT_PC1 + LAT_PC2 + LAT_PC3 + LAT_PC4 + LAT_PC5 + LAT_PC6 + LAT_PC7 + LAT_PC8 + LAT_PC9 + LAT_PC10' 
+
+covars_LAT_ancs_syn <- 'seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + sex_standardised_age + sex_standardised_age_squared + AAC + EAS + LAT + SAS + SSA + LAT_PC1 + LAT_PC2 + LAT_PC3 + LAT_PC4 + LAT_PC5 + LAT_PC6 + LAT_PC7 + LAT_PC8 + LAT_PC9 + LAT_PC10' 
+
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_LAT_ancs_NS))
+      model <- lm(formula, data = LAT_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(LAT_ancs, !is.na(LAT_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'LAT_ancs'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+
+
+var_types<-list('synonymous')
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_LAT_ancs_syn))
+      model <- lm(formula, data = LAT_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(LAT_ancs, !is.na(LAT_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'LAT_ancs'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+```
+
+### SAS regression
+```{r}
+var_types<-list('PTV', 'REVEL75_Miss')
+
+covars_SAS_ancs_NS <- 'seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + sex_standardised_age + sex_standardised_age_squared + synonymous_AC5orless_exome_wide_total + AAC + EAS + LAT + SAS + SSA + SAS_PC1 + SAS_PC2 + SAS_PC3 + SAS_PC4 + SAS_PC5 + SAS_PC6 + SAS_PC7 + SAS_PC8 + SAS_PC9 + SAS_PC10' 
+
+covars_SAS_ancs_syn <- 'seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + sex_standardised_age + sex_standardised_age_squared + AAC + EAS + LAT + SAS + SSA + SAS_PC1 + SAS_PC2 + SAS_PC3 + SAS_PC4 + SAS_PC5 + SAS_PC6 + SAS_PC7 + SAS_PC8 + SAS_PC9 + SAS_PC10' 
+
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_SAS_ancs_NS))
+      model <- lm(formula, data = SAS_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(SAS_ancs, !is.na(SAS_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'SAS_ancs'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+
+
+var_types<-list('synonymous')
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_SAS_ancs_syn))
+      model <- lm(formula, data = SAS_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(SAS_ancs, !is.na(SAS_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'SAS_ancs'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+```
+
+### SSA regression
+```{r}
+var_types<-list('PTV', 'REVEL75_Miss')
+
+covars_SSA_ancs_NS <- 'seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + sex_standardised_age + sex_standardised_age_squared + synonymous_AC5orless_exome_wide_total + AAC + EAS + LAT + SAS + SSA + SSA_PC1 + SSA_PC2 + SSA_PC3 + SSA_PC4 + SSA_PC5 + SSA_PC6 + SSA_PC7 + SSA_PC8 + SSA_PC9 + SSA_PC10' 
+
+covars_SSA_ancs_syn <- 'seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + sex_standardised_age + sex_standardised_age_squared + AAC + EAS + LAT + SAS + SSA + SSA_PC1 + SSA_PC2 + SSA_PC3 + SSA_PC4 + SSA_PC5 + SSA_PC6 + SSA_PC7 + SSA_PC8 + SSA_PC9 + SSA_PC10' 
+
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_SSA_ancs_NS))
+      model <- lm(formula, data = SSA_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(SSA_ancs, !is.na(SSA_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'SSA_ancs'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+
+
+var_types<-list('synonymous')
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_SSA_ancs_syn))
+      model <- lm(formula, data = SSA_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(SSA_ancs, !is.na(SSA_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'SSA_ancs'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+```
+
+### ADM regression
+```{r}
+var_types<-list('PTV', 'REVEL75_Miss')
+
+covars_ADM_ancs_NS <- 'seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + sex_standardised_age + sex_standardised_age_squared + synonymous_AC5orless_exome_wide_total + AAC + EAS + LAT + SAS + SSA + PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10 + PC11 + PC12 + PC13 + PC14 + PC15 + PC16 + PC17 + PC18 + PC19 + PC20 + PC21 + PC22 + PC23 + PC24 + PC25 + PC26 + PC27 + PC28 + PC29 + PC30 +PC31 + PC32 + PC33 + PC34' 
+
+covars_ADM_ancs_syn <- 'seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + sex_standardised_age + sex_standardised_age_squared + AAC + EAS + LAT + SAS + SSA + PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10 + PC11 + PC12 + PC13 + PC14 + PC15 + PC16 + PC17 + PC18 + PC19 + PC20 + PC21 + PC22 + PC23 + PC24 + PC25 + PC26 + PC27 + PC28 + PC29 + PC30 +PC31 + PC32 + PC33 + PC34' 
+
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_ADM_ancs_NS))
+      model <- lm(formula, data = ADM_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(ADM_ancs, !is.na(ADM_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'ADM_ancs'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+
+
+var_types<-list('synonymous')
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_ADM_ancs_syn))
+      model <- lm(formula, data = ADM_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(ADM_ancs, !is.na(ADM_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'ADM_ancs'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+```
+
+
+# Save out results table 
+```{r}
+write.csv(results, 'results_g_regressions_AC5orless_diagnosesrm_incSE_crossancs_Feb25.csv')
+system('dx upload results_g_regressions_AC5orless_diagnosesrm_incSE_crossancs_Feb25.csv --destination ./Variant_counts/Gene_sets/')
+```

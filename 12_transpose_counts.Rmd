@@ -1,0 +1,88 @@
+---
+title: "12_transpose_counts"
+output: html_document
+date: "2024-08-27"
+---
+# Transpose counts
+This script reads in counts from stage 11 (which are written with each person as a different column, and each gene as a different row) and transposes it so the rows are people, and the columns are each gene. This still works on a per chromosome level as the tables would be too big if they spanned all chromosomes. This stage was run using a mem2_ssd2_v2_x16 instance and took 3 hours, costing £2.
+
+## Load packages
+```{r}
+library(data.table)
+```
+
+# Transpose table of burden and save out
+```{r}
+# Make a list of chromosomes, variant classes, and ACs to process (ensure names match up to table names)
+chromosomes <- 1:23
+variant_classes <- c("REVEL75_Miss", "PTV", "synonymous")
+allele_counts <- '5orless'   
+
+# Loop over each chromosome
+for (chr in chromosomes) {
+    for (var in variant_classes) {
+        for (AC in allele_counts) {
+          if (chr == 1) {
+            halves <- c("first_half", "second_half")
+            for (half in halves) {
+                    # Construct the file name for the current half
+                    input_filename <- paste0('./chr_', chr, '_', half, '_', var, '_AC', AC, '_gene_counts.tsv')
+                    
+                    # Download the file to your project using dx download
+                    download_command <- paste('dx download ', shQuote(input_filename))
+                    system(download_command)
+
+                    # Read the table for the current half using fread
+                    input_filename <- paste0('chr_', chr, '_', half, '_', var, '_AC', AC, '_gene_counts.tsv')
+                    counts <- fread(input_filename, header=TRUE, stringsAsFactors=FALSE)
+                     # Remove the gene_id that is NA - if there are any variants not assigned to a gene then Hail writes them to here in the counting process. 
+                    counts=subset(counts, !is.na(counts$gene_id)) 
+                    
+                    # Transpose the table using melt and dcast
+                    transposed_counts <- melt(counts, id.vars = "gene_id", variable.name = "Sample_ID", value.name = "Burden")
+                    transposed_counts <- dcast(transposed_counts, Sample_ID ~ gene_id, value.var = "Burden")
+
+                    # Write the transposed table out
+                    output_filename <- paste0('transposed_chr_', chr, '_', half, '_', var, '_AC', AC, '_gene_counts.tsv')
+                    fwrite(transposed_counts, output_filename, sep = "\t")
+
+                    # Upload the file to your project using dx upload
+                    upload_command <- paste('dx upload', shQuote(output_filename))
+                    system(upload_command)
+                }
+            }
+          else {
+            # Construct the file name 
+            input_filename <- paste0('./chr_', chr, '_', var, '_AC', AC, '_gene_counts.tsv')
+
+            # Download the file to your project using dx download
+            download_command <- paste('dx download ', shQuote(input_filename))
+            system(download_command)
+            
+            # Read the table for the current chromosome using fread and transpos
+            ## Using fread from data table really speeds up the process of reading in 
+            input_filename <- paste0('chr_', chr, '_', var, '_AC', AC, '_gene_counts.tsv')
+            counts <- fread(input_filename, header=TRUE, stringsAsFactors=FALSE)
+            # Remove the gene_id that is NA - if there are any variants not assigned to a gene then Hail writes them to here in the counting process. 
+            counts=subset(counts, !is.na(counts$gene_id)) 
+            
+            # Transpose the table using melt and dcast:
+            ## Melt takes table from wide format into a v long format, where each row represents a single observation (so a single gene and a single sample)
+            ### This transposed table is really big so you need a fairly high mem session for this.
+            transposed_counts <- melt(counts, id.vars = "gene_id", variable.name = "Sample_ID", value.name = "Burden")
+            ## dcast then takes the dataset in this long format and casts it back to a wide format, but this time with sample id as rows and genes as columns
+            transposed_counts <- dcast(transposed_counts, Sample_ID ~ gene_id, value.var = "Burden")
+            
+            # Write the transposed table out 
+            output_filename <- paste0('transposed_chr_', chr, '_', var, '_AC', AC, '_gene_counts.tsv')
+            fwrite(transposed_counts, output_filename, sep = "\t")
+
+            # Upload the file to your project using dx upload
+            upload_command <- paste('dx upload', shQuote(output_filename),'--destination ./Variant_counts/transposed_counts/')
+            system(upload_command)
+          } 
+        }
+    }
+}
+          
+```

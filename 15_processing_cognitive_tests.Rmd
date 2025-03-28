@@ -1,0 +1,1270 @@
+---
+title: "15_processing_cognitive_tests.Rmd"
+output: html_document
+date: "2024-09-24"
+---
+
+# Processing cognitive tests
+This script processes phenotype data from UKBB cognitive tests. It cleans the data and forms a g score. It was run in a mem1_ssd1_v2_x8 instance, and took < 1 hour costing ~£0.20. 
+
+# Set-up 
+## Load required libraries 
+```{r setup, include=FALSE}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+install.packages('moments')
+library(moments)
+install.packages('corrplot')
+library(corrplot)
+library(purrr)
+
+```
+
+## Load in data
+Note that all required fields were first selected in cohort browser, and then exported to .csv using the Table Exporter tool on the RAP. 
+```{r}
+system('dx download ./phenotype_cohorts/*cog.csv')
+online_cog=read.csv('online_cog.csv')
+AC_cog=read.csv('AC_cog.csv')
+cog=merge(AC_cog, online_cog, by='eid')
+
+system('dx download ./phenotype_cohorts/missing_NM_phenotypes_participant.csv')
+missing_phen=read.csv('missing_NM_phenotypes_participant.csv')
+cog=merge(cog, missing_phen, by='eid')
+
+system('dx download ./phenotype_cohorts/missing_phens_SDS_participant.csv')
+missing_phen=read.csv('missing_phens_SDS_participant.csv')
+cog=merge(cog, missing_phen, by='eid')
+
+system('dx download ./phenotype_cohorts/prosp_mem.csv')
+missing_phen=read.csv('prosp_mem.csv')
+cog=merge(cog, missing_phen, by='eid')
+
+cog$Sample_ID<-cog$eid
+backup_cog<-cog
+
+```
+
+# Numeric memory
+This test was completed at in-person assessment centres and online. It is a test of working memory, and involved remembering numbers that progressively increased by one digit and inputting them immediately after presentation. 
+
+Here, I select the highest number of digits correctly remembered (from both the online test and each assessment centre) as the outcome measures (UKBB fields 4282 and 20240). 
+
+## First assessment centre
+```{r}
+cog %>% count(p4282_i0)
+
+a=subset(cog, !(cog$p4282_i0=="" | cog$p4282_i0=='Abandoned'))
+a=select(a, c("Sample_ID","p4282_i0"))
+a$Numeric_memory_AC1_maximum_digits_remembered<-as.numeric(a$p4282_i0)
+
+# Plot raw score
+tiff("NM_AC1_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(a, aes(Numeric_memory_AC1_maximum_digits_remembered))+
+  geom_histogram(binwidth=1)+
+  labs(x='Numeric memory (first assessment centre) maximum digits remembered correctly')
+dev.off()
+
+# Form z score
+a$Numeric_memory_AC1_maximum_digits_remembered_Zscore=((a$Numeric_memory_AC1_maximum_digits_remembered
+                                                    -mean(a$Numeric_memory_AC1_maximum_digits_remembered))
+                                                   /sd(a$Numeric_memory_AC1_maximum_digits_remembered, na.rm = T))
+mean(a$Numeric_memory_AC1_maximum_digits_remembered_Zscore)
+min(a$Numeric_memory_AC1_maximum_digits_remembered_Zscore)
+max(a$Numeric_memory_AC1_maximum_digits_remembered_Zscore)
+# No outlier removal needed
+
+a=select(a, c(1,3,4))
+cog_z_scores=select(cog, 'Sample_ID')
+cog_z_scores = merge(cog_z_scores, a, by='Sample_ID', all = TRUE)
+
+# Plot z score 
+tiff("NM_AC1_Zscore_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(cog_z_scores, aes(Numeric_memory_AC1_maximum_digits_remembered_Zscore))+
+  geom_histogram(binwidth=0.8)+
+  labs(x='Numeric memory (AC1) maximum digits remembered correctly - Z score')
+dev.off()
+```
+
+## Third assessment centre
+```{r}
+cog %>% count(p4282_i2)
+
+a=subset(cog, !(cog$p4282_i2=="" | cog$p4282_i2=='Abandoned'))
+a=select(a, c("Sample_ID","p4282_i2"))
+a$Numeric_memory_AC3_maximum_digits_remembered<-as.numeric(a$p4282_i2)
+
+# Plot raw score
+tiff("NM_AC3_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(a, aes(Numeric_memory_AC3_maximum_digits_remembered))+
+  geom_histogram(binwidth=1)+
+  labs(x='Numeric memory (third assessment centre) maximum digits remembered correctly')
+dev.off()
+
+
+# Form z score
+a$Numeric_memory_AC3_maximum_digits_remembered_Zscore=((a$Numeric_memory_AC3_maximum_digits_remembered
+                                                    -mean(a$Numeric_memory_AC3_maximum_digits_remembered))
+                                                   /sd(a$Numeric_memory_AC3_maximum_digits_remembered, na.rm = T))
+mean(a$Numeric_memory_AC3_maximum_digits_remembered_Zscore)
+max(a$Numeric_memory_AC3_maximum_digits_remembered_Zscore)
+min(a$Numeric_memory_AC3_maximum_digits_remembered_Zscore)
+
+# Remove outliers (+/- 4SDs of mean)
+b=subset(a, a$Numeric_memory_AC3_maximum_digits_remembered_Zscore<4 & a$Numeric_memory_AC3_maximum_digits_remembered_Zscore>-4)
+b$Numeric_memory_AC3_maximum_digits_remembered_Zscore_outliersrm<-b$Numeric_memory_AC3_maximum_digits_remembered_Zscore
+b<-select(b, "Sample_ID", "Numeric_memory_AC3_maximum_digits_remembered_Zscore_outliersrm")
+a=merge(a, b, by='Sample_ID', all=T)
+
+
+# Recode outliers(+/-4SDs of mean)
+a$Numeric_memory_AC3_maximum_digits_remembered_Zscore_outliersrecoded<-a$Numeric_memory_AC3_maximum_digits_remembered_Zscore
+a$Numeric_memory_AC3_maximum_digits_remembered_Zscore_outliersrecoded[a$Numeric_memory_AC3_maximum_digits_remembered_Zscore > 4] <- 4
+a$Numeric_memory_AC3_maximum_digits_remembered_Zscore_outliersrecoded[a$Numeric_memory_AC3_maximum_digits_remembered_Zscore < -4] <- -4
+
+
+a=select(a, c(1,3:6))
+cog_z_scores = merge(cog_z_scores, a, by='Sample_ID', all = TRUE) 
+
+
+# Plot z score 
+tiff("NM_AC3_Zscore_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(cog_z_scores, aes(Numeric_memory_AC3_maximum_digits_remembered_Zscore_outliersrm))+
+  geom_histogram(binwidth=0.8)+
+  labs(x='Numeric memory (third assessment centre) maximum digits remembered correctly - Z score')
+dev.off()
+```
+
+## Online
+```{r}
+cog %>% count(p20240_i0)
+a=subset(cog, !is.na(cog$p20240_i0))
+a=select(a, c("Sample_ID","p20240_i0"))
+a$Numeric_memory_online_maximum_digits_remembered<-as.numeric(a$p20240_i0)
+
+# Plot raw score
+tiff("NM_online_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(a, aes(Numeric_memory_online_maximum_digits_remembered))+
+  geom_histogram(binwidth=1)+
+  labs(x='Numeric memory (online) maximum digits remembered correctly')
+dev.off()
+
+# Form z score
+a$Numeric_memory_online_maximum_digits_remembered_Zscore=((a$Numeric_memory_online_maximum_digits_remembered
+                                                    -mean(a$Numeric_memory_online_maximum_digits_remembered))
+                                                   /sd(a$Numeric_memory_online_maximum_digits_remembered, na.rm = T))
+mean(a$Numeric_memory_online_maximum_digits_remembered_Zscore)
+min(a$Numeric_memory_online_maximum_digits_remembered_Zscore)
+max(a$Numeric_memory_online_maximum_digits_remembered_Zscore)
+a=select(a, c(1,3,4))
+cog_z_scores = merge(cog_z_scores, a, by='Sample_ID', all = TRUE)
+
+# Plot z score 
+tiff("NM_online_Zscore_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(cog_z_scores, aes(Numeric_memory_online_maximum_digits_remembered_Zscore))+
+  geom_histogram(binwidth=0.7)+
+  labs(x='Numeric memory (online) maximum digits remembered correctly - Z score')
+dev.off()
+
+
+## Online ONLY
+a=subset(cog_z_scores, is.na(cog_z_scores$Numeric_memory_AC1_maximum_digits_remembered) &
+           is.na(cog_z_scores$Numeric_memory_AC3_maximum_digits_remembered))
+a$Numeric_memory_online_ONLY_maximum_digits_remembered_Zscore<-a$Numeric_memory_online_maximum_digits_remembered_Zscore
+a=select(a, c(1,10))
+cog_z_scores = merge(cog_z_scores, a, by='Sample_ID', all = TRUE)
+
+tiff("NM_online_ONLY_Zscore_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(cog_z_scores, aes(Numeric_memory_online_ONLY_maximum_digits_remembered_Zscore))+
+  geom_histogram(binwidth=0.7)+
+  labs(x='Numeric memory (online ONLY) maximum digits remembered correctly - Z score')
+dev.off()
+
+```
+
+## Save plots out
+```{r}
+system('dx upload NM*.tiff --destination ./phenotype_cohorts/processed_cognition/')
+```
+
+
+# Pairs matching 
+This test was completed at in-person assessment centres and online. It is a test of declarative memory. A matrix of face up cards was presented, and participants were asked to remember the position of as many pairs of matching cards as possible. Cards were then turned face-down, and participants selected the pairs of cards. Two rounds of this task were run, with the second involving a larger number of cards, and therefore pairs, to remember. 
+
+Given that almost all participants completed this test at assessment centres, the online instance was not considered in this case.
+
+Here, I select the number of incorrect matches across the two rounds (UKBB field 399) as the outcome measure. 
+
+## First assessment centre 
+```{r}
+cog %>% count(p399_i0_a1)
+cog %>% count(p399_i0_a2)
+
+a=subset(cog, (!is.na(cog$p399_i0_a1)&!is.na(cog$p399_i0_a2)))
+a=select(a, c("Sample_ID","p399_i0_a2", "p399_i0_a1"))
+a$Pairs_matching_AC1_n_incorrect_matches<-as.numeric(a$p399_i0_a1+ a$p399_i0_a2)
+
+# Plot raw score
+tiff("PM_AC1_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(a, aes(Pairs_matching_AC1_n_incorrect_matches))+
+  geom_histogram(binwidth=1)+
+  labs(x='Pairs Matching (first assessment centre) number of incorrect matches')
+dev.off()
+
+# Transform 
+a$Pairs_matching_AC1_n_incorrect_matches_log1p = log1p(a$Pairs_matching_AC1_n_incorrect_matches)
+
+tiff("PM_AC1_log1p_transformed_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(a, aes(Pairs_matching_AC1_n_incorrect_matches_log1p))+
+  geom_histogram(binwidth=0.5)+
+  labs(x='Pairs Matching (first assessment centre) number of incorrect matches - log(x+1) transformed')
+dev.off()
+
+# Form z score
+a$Pairs_matching_AC1_n_incorrect_matches_Z_score=((a$Pairs_matching_AC1_n_incorrect_matches_log1p
+                                                    -mean(a$Pairs_matching_AC1_n_incorrect_matches_log1p))
+                                                   /sd(a$Pairs_matching_AC1_n_incorrect_matches_log1p, na.rm = T))
+
+
+# Remove outliers (+/- 4SDs of mean)
+b=subset(a, a$Pairs_matching_AC1_n_incorrect_matches_Z_score<4 & a$Pairs_matching_AC1_n_incorrect_matches_Z_score>-4)
+b$Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm<-b$Pairs_matching_AC1_n_incorrect_matches_Z_score
+b<-select(b, "Sample_ID", "Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm")
+a=merge(a, b, by='Sample_ID', all=T)
+
+# Recode outliers(+/-4SDs of mean)
+a$Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrecoded<-a$Pairs_matching_AC1_n_incorrect_matches_Z_score
+a$Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrecoded[a$Pairs_matching_AC1_n_incorrect_matches_Z_score > 4] <- 4
+a$Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrecoded[a$Pairs_matching_AC1_n_incorrect_matches_Z_score < -4] <- -4
+
+
+a=select(a, c(1,4:8))
+cog_z_scores = merge(cog_z_scores, a, by='Sample_ID', all = TRUE)
+
+# Plot z score 
+tiff("PM_AC1_Zscore_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(cog_z_scores, aes(Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm))+
+  geom_histogram(binwidth=0.7)+
+  labs(x='Pairs Matching (first assessment centre) number of incorrect matches - Z score')
+dev.off()
+```
+## Save plots out
+```{r}
+system('dx upload PM*.tiff --destination ./phenotype_cohorts/processed_cognition/')
+```
+
+
+
+# Reaction time
+This test was completed at in-person assessment centres and online. It is a test of processing speed. It is similar to a game of ‘snap’, played across 12 rounds. The participant was shown two cards and asked to press a button if they matched.
+
+Given that almost all participants completed this test at assessment centres, the online instance was not considered in this case.
+
+Here, I select the mean time taken to press the button (UKBB field 20023) as the outcome measure. 
+
+## First assessment centre 
+```{r}
+cog %>% count(p20023_i0)
+
+a=subset(cog, (!is.na(cog$p20023_i0)))
+a=select(a, c("Sample_ID","p20023_i0"))
+a$Reaction_time_AC1_mean_time_taken<-as.numeric(a$p20023_i0)
+
+# Plot raw score
+tiff("RT_AC1_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(a, aes(Reaction_time_AC1_mean_time_taken))+
+  geom_histogram(binwidth=20)+
+  labs(x='Reaction time (first assessment centre) mean time to \n correctly identify matches (ms)')
+dev.off()
+
+# Transform 
+a$Reaction_time_AC1_mean_time_taken_log = log(a$Reaction_time_AC1_mean_time_taken)
+
+tiff("RT_AC1_log_transformed_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(a, aes(Reaction_time_AC1_mean_time_taken_log))+
+  geom_histogram(binwidth=0.05)+
+  labs(x='Reaction time (first assessment centre) mean time to \n correctly identify matches (ms) - log transformed')
+dev.off()
+
+# Form z score
+a$Reaction_time_AC1_mean_time_taken_Zscore=((a$Reaction_time_AC1_mean_time_taken_log
+                                                    -mean(a$Reaction_time_AC1_mean_time_taken_log))
+                                                   /sd(a$Reaction_time_AC1_mean_time_taken_log, na.rm = T))
+
+
+# Remove outliers (+/- 4SDs of mean)
+b=subset(a, a$Reaction_time_AC1_mean_time_taken_Zscore<4 & a$Reaction_time_AC1_mean_time_taken_Zscore>-4)
+b$Reaction_time_AC1_mean_time_taken_Zscore_outliersrm<-b$Reaction_time_AC1_mean_time_taken_Zscore
+b<-select(b, "Sample_ID", "Reaction_time_AC1_mean_time_taken_Zscore_outliersrm")
+a=merge(a, b, by='Sample_ID', all=T)
+
+
+# Recode outliers(+/-4SDs of mean)
+a$Reaction_time_AC1_mean_time_taken_Zscore_outliersrecoded<-a$Reaction_time_AC1_mean_time_taken_Zscore
+a$Reaction_time_AC1_mean_time_taken_Zscore_outliersrecoded[a$Reaction_time_AC1_mean_time_taken_Zscore > 4] <- 4
+a$Reaction_time_AC1_mean_time_taken_Zscore_outliersrecoded[a$Reaction_time_AC1_mean_time_taken_Zscore < -4] <- -4
+
+a=select(a, c(1,3:7))
+cog_z_scores = merge(cog_z_scores, a, by='Sample_ID', all = TRUE)
+
+# Plot z score 
+tiff("RT_AC1_Zscore_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(cog_z_scores, aes(Reaction_time_AC1_mean_time_taken_Zscore_outliersrm))+
+  geom_histogram(binwidth=0.3)+
+  labs(x='Reaction time (first assessment centre) mean time to \n correctly identify matches - Z score')
+dev.off()
+```
+## Save plots out
+```{r}
+system('dx upload RT*.tiff --destination ./phenotype_cohorts/processed_cognition/')
+```
+
+
+
+# TMTA
+This test was completed at in-person assessment centres and online. It is a test of processing speed. Participants were presented with a set of digits scattered across the screen and asked to click on them in numeric order.
+
+Here, I select the time taken to complete the trail (both at the third assessment centre and online, UKBB fields 6348 and 20156). 
+
+## Third assessment centre (imaging visit)
+```{r}
+cog %>% count(p6348_i2)
+
+a=subset(cog, !(cog$p6348_i2==""))
+a=subset(a, !(a$p6348_i2=='Trail not completed'))
+a=select(a, c("Sample_ID","p6348_i2"))
+a$TMTA_AC3_time_to_complete_numeric_path<-as.numeric(a$p6348_i2)
+
+# Plot raw score
+tiff("TMTA_AC3_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(a, aes(TMTA_AC3_time_to_complete_numeric_path))+
+  geom_histogram(binwidth=10)+
+  labs(x='TMTA (third assessment centre) time taken to complete numeric path (ds)')
+dev.off()
+
+# Transform 
+a$TMTA_AC3_time_to_complete_numeric_path_log = log(a$TMTA_AC3_time_to_complete_numeric_path)
+
+tiff("TMTA_AC3_log_transformed_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(a, aes(TMTA_AC3_time_to_complete_numeric_path_log))+
+  geom_histogram(binwidth=0.1)+
+  labs(x='TMTA (third assessment centre) time taken to complete numeric path - log transformed')
+dev.off()
+
+# Form z score
+a$TMTA_AC3_time_to_complete_numeric_path_Zscore=((a$TMTA_AC3_time_to_complete_numeric_path_log
+                                                    -mean(a$TMTA_AC3_time_to_complete_numeric_path_log))
+                                                   /sd(a$TMTA_AC3_time_to_complete_numeric_path_log, na.rm = T))
+mean(a$TMTA_AC3_time_to_complete_numeric_path_Zscore)
+max(a$TMTA_AC3_time_to_complete_numeric_path_Zscore)
+min(a$TMTA_AC3_time_to_complete_numeric_path_Zscore)
+
+# Remove outliers (+/- 4SDs of mean)
+b=subset(a, a$TMTA_AC3_time_to_complete_numeric_path_Zscore<4 & a$TMTA_AC3_time_to_complete_numeric_path_Zscore>-4)
+b$TMTA_AC3_time_to_complete_numeric_path_Zscore_outliersrm<-b$TMTA_AC3_time_to_complete_numeric_path_Zscore
+b<-select(b, "Sample_ID", "TMTA_AC3_time_to_complete_numeric_path_Zscore_outliersrm")
+a=merge(a, b, by='Sample_ID', all=T)
+
+# Recode outliers(+/-4SDs of mean)
+a$TMTA_AC3_time_to_complete_numeric_path_Zscore_outliersrecoded<-a$TMTA_AC3_time_to_complete_numeric_path_Zscore
+a$TMTA_AC3_time_to_complete_numeric_path_Zscore_outliersrecoded[a$TMTA_AC3_time_to_complete_numeric_path_Zscore > 4] <- 4
+a$TMTA_AC3_time_to_complete_numeric_path_Zscore_outliersrecoded[a$TMTA_AC3_time_to_complete_numeric_path_Zscore < -4] <- -4
+
+a=select(a, c(1,3:7))
+cog_z_scores = merge(cog_z_scores, a, by='Sample_ID', all = TRUE)
+
+
+# Plot z score 
+tiff("TMTA_AC3_Zscore_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(cog_z_scores, aes(TMTA_AC3_time_to_complete_numeric_path_Zscore_outliersrm))+
+  geom_histogram(binwidth=0.2)+
+  labs(x='TMTA (third assessment centre) time taken to complete numeric path - Z score')
+dev.off()
+```
+
+## Online - 1 
+```{r}
+cog %>% count(p20156_i1)
+
+a=subset(cog, !is.na(cog$p20156_i0))
+a=select(a, c("Sample_ID","p20156_i0"))
+a$TMTA_online1_time_to_complete_numeric_path<-a$p20156_i0                
+
+# Plot raw score
+tiff("TMTA_online_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(a, aes(TMTA_online1_time_to_complete_numeric_path))+
+  geom_histogram(binwidth=2)+
+  labs(x='TMTA (online - 1) time taken to complete numeric path (s)')
+dev.off()
+
+# Transform 
+a$TMTA_online1_time_to_complete_numeric_path_log = log(a$TMTA_online1_time_to_complete_numeric_path)
+
+tiff("TMTA_online1_log_transformed_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(a, aes(TMTA_online1_time_to_complete_numeric_path_log))+
+  geom_histogram(binwidth=0.05)+
+  labs(x='TMTA (online 1) time taken to complete numeric path - log transformed')
+dev.off()
+
+# Form z score
+a$TMTA_online1_time_to_complete_numeric_path_Zscore=((a$TMTA_online1_time_to_complete_numeric_path_log
+                                                    -mean(a$TMTA_online1_time_to_complete_numeric_path_log))
+                                                   /sd(a$TMTA_online1_time_to_complete_numeric_path_log, na.rm = T))
+mean(a$TMTA_online1_time_to_complete_numeric_path_Zscore)
+max(a$TMTA_online1_time_to_complete_numeric_path_Zscore)
+min(a$TMTA_online1_time_to_complete_numeric_path_Zscore)
+
+# Remove outliers (+/- 4SDs of mean)
+b=subset(a, a$TMTA_online1_time_to_complete_numeric_path_Zscore<4 & a$TMTA_online1_time_to_complete_numeric_path_Zscore>-4)
+b$TMTA_online1_time_to_complete_numeric_path_Zscore_outliersrm<-b$TMTA_online1_time_to_complete_numeric_path_Zscore
+b<-select(b, "Sample_ID", "TMTA_online1_time_to_complete_numeric_path_Zscore_outliersrm")
+a=merge(a, b, by='Sample_ID', all=T)
+
+# Recode outliers(+/-4SDs of mean)
+a$TMTA_online1_time_to_complete_numeric_path_Zscore_outliersrecoded<-a$TMTA_online1_time_to_complete_numeric_path_Zscore
+a$TMTA_online1_time_to_complete_numeric_path_Zscore_outliersrecoded[a$TMTA_online1_time_to_complete_numeric_path_Zscore > 4] <- 4
+a$TMTA_online1_time_to_complete_numeric_path_Zscore_outliersrecoded[a$TMTA_online1_time_to_complete_numeric_path_Zscore < -4] <- -4
+
+a=select(a, c(1,3:7))
+cog_z_scores = merge(cog_z_scores, a, by='Sample_ID', all = TRUE)
+
+
+# Plot z score 
+tiff("TMTA_online1_Zscore_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(cog_z_scores, aes(TMTA_online1_time_to_complete_numeric_path_Zscore_outliersrm))+
+  geom_histogram(binwidth=0.4)+
+  labs(x='TMTA (online 1) time taken to complete numeric path - Z score')
+dev.off()
+
+## Online ONLY
+a=subset(cog_z_scores, is.na(cog_z_scores$TMTA_AC3_time_to_complete_numeric_path))
+a$TMTA_online_ONLY_time_to_complete_numeric_path_Zscore_outliersrm<-a$TMTA_online1_time_to_complete_numeric_path_Zscore_outliersrm
+a=select(a, c(1,31))
+cog_z_scores = merge(cog_z_scores, a, by='Sample_ID', all = TRUE)
+
+tiff("TMTA_online_ONLY_Zscore_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(cog_z_scores, aes(TMTA_online_ONLY_time_to_complete_numeric_path_Zscore_outliersrm))+
+  geom_histogram(binwidth=0.7)+
+  labs(x='TMTA (online ONLY)- Z score')
+dev.off()
+```
+
+
+## Save plots out
+```{r}
+system('dx upload TMTA*.tiff --destination ./phenotype_cohorts/processed_cognition/')
+```
+
+
+# TMTB
+This test was completed at in-person assessment centres and online. It is a test of executive function. Participants were presented with a set of letters and digits scattered across the screen and were asked to click on them in alphanumeric order (e.g., A-1-B-2-C…).
+
+Here, I select the time taken to complete the trail (both at the third assessment centre and online, UKBB fields 6350 and 20157). 
+
+## Third assessment centre (imaging visit)
+```{r}
+cog %>% count(p6350_i2)
+
+a=subset(cog, !(cog$p6350_i2==""))
+a=subset(a, !(a$p6350_i2=='Trail not completed'))
+a=select(a, c("Sample_ID","p6350_i2"))
+a$TMTB_AC3_time_to_complete_numeric_path<-as.numeric(a$p6350_i2)
+
+# Plot raw score
+tiff("TMTB_AC3_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(a, aes(TMTB_AC3_time_to_complete_numeric_path))+
+  geom_histogram(binwidth=20)+
+  labs(x='TMTB (third assessment centre) time taken to complete numeric path (ds)')
+dev.off()
+
+# Transform 
+a$TMTB_AC3_time_to_complete_numeric_path_log = log(a$TMTB_AC3_time_to_complete_numeric_path)
+
+tiff("TMT_AC3_log_transformed_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(a, aes(TMTB_AC3_time_to_complete_numeric_path_log))+
+  geom_histogram(binwidth=0.1)+
+  labs(x='TMTB (third assessment centre) time taken to complete numeric path - log transformed')
+dev.off()
+
+# Form z score
+a$TMTB_AC3_time_to_complete_numeric_path_Zscore=((a$TMTB_AC3_time_to_complete_numeric_path_log
+                                                    -mean(a$TMTB_AC3_time_to_complete_numeric_path_log))
+                                                   /sd(a$TMTB_AC3_time_to_complete_numeric_path_log, na.rm = T))
+mean(a$TMTB_AC3_time_to_complete_numeric_path_Zscore)
+max(a$TMTB_AC3_time_to_complete_numeric_path_Zscore)
+min(a$TMTB_AC3_time_to_complete_numeric_path_Zscore)
+
+# Remove outliers (+/- 4SDs of mean)
+b=subset(a, a$TMTB_AC3_time_to_complete_numeric_path_Zscore<4 & a$TMTB_AC3_time_to_complete_numeric_path_Zscore>-4)
+b$TMTB_AC3_time_to_complete_numeric_path_Zscore_outliersrm<-b$TMTB_AC3_time_to_complete_numeric_path_Zscore
+b<-select(b, "Sample_ID", "TMTB_AC3_time_to_complete_numeric_path_Zscore_outliersrm")
+a=merge(a, b, by='Sample_ID', all=T)
+
+# Recode outliers(+/-4SDs of mean)
+a$TMTB_AC3_time_to_complete_numeric_path_Zscore_outliersrecoded<-a$TMTB_AC3_time_to_complete_numeric_path_Zscore
+a$TMTB_AC3_time_to_complete_numeric_path_Zscore_outliersrecoded[a$TMTB_AC3_time_to_complete_numeric_path_Zscore > 4] <- 4
+a$TMTB_AC3_time_to_complete_numeric_path_Zscore_outliersrecoded[a$TMTB_AC3_time_to_complete_numeric_path_Zscore < -4] <- -4
+
+a=select(a, c(1,3:7))
+cog_z_scores = merge(cog_z_scores, a, by='Sample_ID', all = TRUE)
+
+
+# Plot z score 
+tiff("TMTB_AC3_Zscore_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(cog_z_scores, aes(TMTA_AC3_time_to_complete_numeric_path_Zscore_outliersrm))+
+  geom_histogram(binwidth=0.2)+
+  labs(x='TMTB (third assessment centre) time taken to complete numeric path - Z score')
+dev.off()
+```
+
+## Online 1 
+```{r}
+cog %>% count(p20157_i0)
+
+a=subset(cog, !is.na(cog$p20157_i0))
+a=select(a, c("Sample_ID","p20157_i0"))
+a$TMTB_online1_time_to_complete_numeric_path<-a$p20157_i0                
+
+# Plot raw score
+tiff("TMTB_online1_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(a, aes(TMTB_online1_time_to_complete_numeric_path))+
+  geom_histogram(binwidth=2)+
+  labs(x='TMTB (online 1) time taken to complete numeric path (s)')
+dev.off()
+
+# Transform 
+a$TMTB_online1_time_to_complete_numeric_path_log = log(a$TMTB_online1_time_to_complete_numeric_path)
+
+tiff("TMTB_online1_log_transformed_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(a, aes(TMTB_online1_time_to_complete_numeric_path_log))+
+  geom_histogram(binwidth=0.05)+
+  labs(x='TMTB (online 1) time taken to complete numeric path - log transformed')
+dev.off()
+
+# Form z score
+a$TMTB_online1_time_to_complete_numeric_path_Zscore=((a$TMTB_online1_time_to_complete_numeric_path_log
+                                                    -mean(a$TMTB_online1_time_to_complete_numeric_path_log))
+                                                   /sd(a$TMTB_online1_time_to_complete_numeric_path_log, na.rm = T))
+mean(a$TMTB_online1_time_to_complete_numeric_path_Zscore)
+max(a$TMTB_online1_time_to_complete_numeric_path_Zscore)
+min(a$TMTB_online1_time_to_complete_numeric_path_Zscore)
+
+# Remove outliers (+/- 4SDs of mean)
+b=subset(a, a$TMTB_online1_time_to_complete_numeric_path_Zscore<4 & a$TMTB_online1_time_to_complete_numeric_path_Zscore>-4)
+b$TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm<-b$TMTB_online1_time_to_complete_numeric_path_Zscore
+b<-select(b, "Sample_ID", "TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm")
+a=merge(a, b, by='Sample_ID', all=T)
+
+a=select(a, c(1,3:6))
+cog_z_scores = merge(cog_z_scores, a, by='Sample_ID', all = TRUE)
+
+
+# Plot z score 
+tiff("TMTB_online1_Zscore_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(cog_z_scores, aes(TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm))+
+  geom_histogram(binwidth=0.2)+
+  labs(x='TMTB (online 1) time taken to complete numeric path - Z score')
+dev.off()
+
+## Online ONLY
+a=subset(cog_z_scores, is.na(cog_z_scores$TMTB_AC3_time_to_complete_numeric_path))
+a$TMTB_online_ONLY_time_to_complete_numeric_path_Zscore_outliersrm<-a$TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm
+a=select(a, c(1,41))
+cog_z_scores = merge(cog_z_scores, a, by='Sample_ID', all = TRUE)
+
+tiff("TMTB_online_ONLY_Zscore_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(cog_z_scores, aes(TMTB_online_ONLY_time_to_complete_numeric_path_Zscore_outliersrm))+
+  geom_histogram(binwidth=0.7)+
+  labs(x='TMTB (online ONLY)- Z score')
+dev.off()
+```
+
+
+## Save plots out
+```{r}
+system('dx upload TMTB*.tiff --destination ./phenotype_cohorts/processed_cognition/')
+```
+
+
+
+# Fluid intelligence 
+This test was completed at in-person assessment centres and online. It is a test of reasoning. Participants were presented with 13 questions designed to measure their problem solving, logic, and reasoning capacity, independent of acquired knowledge. They were given 2 minutes to answer as many multiple-choice questions as possible (with a maximum of 13). The questions got progressively harder. 
+ 
+Here, I select the Number of correct answers given (UKBB field 20016 and 20191) both in person and online as outcome measures.
+
+## First assessment centre
+```{r}
+cog %>% count(p20016_i0)
+
+a=subset(cog, !is.na(cog$p20016_i0))
+a=select(a, c("Sample_ID","p20016_i0"))
+a$FI_AC1_n_correct_answers<-as.numeric(a$p20016_i0)
+
+# Plot raw score
+tiff("FI_AC1_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(a, aes(FI_AC1_n_correct_answers))+
+  geom_histogram(binwidth=1)+
+  labs(x='FI (first assessment centre) n correct answers')
+dev.off()
+
+
+
+# Form z score
+a$FI_AC1_n_correct_answers_Zscore=((a$FI_AC1_n_correct_answers
+                                                    -mean(a$FI_AC1_n_correct_answers))
+                                                   /sd(a$FI_AC1_n_correct_answers, na.rm = T))
+mean(a$FI_AC1_n_correct_answers_Zscore)
+max(a$FI_AC1_n_correct_answers_Zscore)
+min(a$FI_AC1_n_correct_answers_Zscore)
+
+# No outlier removal needed
+
+a=select(a, c(1,3:4))
+cog_z_scores = merge(cog_z_scores, a, by='Sample_ID', all = TRUE)
+
+
+# Plot z score 
+tiff("FI_AC1_Zscore_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(cog_z_scores, aes(FI_AC1_n_correct_answers_Zscore))+
+  geom_histogram(binwidth=0.5)+
+  labs(x='FI (first assessment centre) n correct answers - Z score')
+dev.off()
+```
+
+
+
+## Second assessment centre
+```{r}
+cog %>% count(p20016_i1)
+
+a=subset(cog, !is.na(cog$p20016_i1))
+a=select(a, c("Sample_ID","p20016_i1"))
+a$FI_AC2_n_correct_answers<-as.numeric(a$p20016_i1)
+
+# Plot raw score
+tiff("FI_AC2_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(a, aes(FI_AC2_n_correct_answers))+
+  geom_histogram(binwidth=1)+
+  labs(x='FI (second assessment centre) n correct answers')
+dev.off()
+
+
+
+# Form z score
+a$FI_AC2_n_correct_answers_Zscore=((a$FI_AC2_n_correct_answers
+                                                    -mean(a$FI_AC2_n_correct_answers))
+                                                   /sd(a$FI_AC2_n_correct_answers, na.rm = T))
+mean(a$FI_AC2_n_correct_answers_Zscore)
+max(a$FI_AC2_n_correct_answers_Zscore)
+min(a$FI_AC2_n_correct_answers_Zscore)
+
+# No outlier removal needed
+
+
+a=select(a, c(1,3:4))
+cog_z_scores = merge(cog_z_scores, a, by='Sample_ID', all = TRUE)
+
+
+# Plot z score 
+tiff("FI_AC2_Zscore_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(cog_z_scores, aes(FI_AC2_n_correct_answers_Zscore))+
+  geom_histogram(binwidth=0.9)+
+  labs(x='FI (second assessment centre) n correct answers - Z score')
+dev.off()
+```
+
+## Third assessment centre
+```{r}
+cog %>% count(p20016_i2)
+
+a=subset(cog, !is.na(cog$p20016_i2))
+a=select(a, c("Sample_ID","p20016_i2"))
+a$FI_AC3_n_correct_answers<-as.numeric(a$p20016_i2)
+
+# Plot raw score
+tiff("FI_AC3_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(a, aes(FI_AC3_n_correct_answers))+
+  geom_histogram(binwidth=1)+
+  labs(x='FI (third assessment centre) n correct answers')
+dev.off()
+
+
+
+# Form z score
+a$FI_AC3_n_correct_answers_Zscore=((a$FI_AC3_n_correct_answers
+                                                    -mean(a$FI_AC3_n_correct_answers))
+                                                   /sd(a$FI_AC3_n_correct_answers, na.rm = T))
+mean(a$FI_AC3_n_correct_answers_Zscore)
+max(a$FI_AC3_n_correct_answers_Zscore)
+min(a$FI_AC3_n_correct_answers_Zscore)
+
+# No outlier removal needed
+
+
+a=select(a, c(1,3:4))
+cog_z_scores = merge(cog_z_scores, a, by='Sample_ID', all = TRUE)
+
+
+# Plot z score 
+tiff("FI_AC3_Zscore_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(cog_z_scores, aes(FI_AC3_n_correct_answers_Zscore))+
+  geom_histogram(binwidth=0.9)+
+  labs(x='FI (third assessment centre) n correct answers - Z score')
+dev.off()
+```
+
+## Fourth assessment centre
+```{r}
+cog %>% count(p20016_i3)
+
+a=subset(cog, !is.na(cog$p20016_i3))
+a=select(a, c("Sample_ID","p20016_i3"))
+a$FI_AC4_n_correct_answers<-as.numeric(a$p20016_i3)
+
+# Plot raw score
+tiff("FI_AC4_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(a, aes(FI_AC4_n_correct_answers))+
+  geom_histogram(binwidth=1)+
+  labs(x='FI (fourth assessment centre) n correct answers')
+dev.off()
+
+
+
+# Form z score
+a$FI_AC4_n_correct_answers_Zscore=((a$FI_AC4_n_correct_answers
+                                                    -mean(a$FI_AC4_n_correct_answers))
+                                                   /sd(a$FI_AC4_n_correct_answers, na.rm = T))
+mean(a$FI_AC4_n_correct_answers_Zscore)
+max(a$FI_AC4_n_correct_answers_Zscore)
+min(a$FI_AC4_n_correct_answers_Zscore)
+
+# No outlier removal needed
+
+
+a=select(a, c(1,3:4))
+cog_z_scores = merge(cog_z_scores, a, by='Sample_ID', all = TRUE)
+
+
+# Plot z score 
+tiff("FI_AC4_Zscore_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(cog_z_scores, aes(FI_AC4_n_correct_answers_Zscore))+
+  geom_histogram(binwidth=0.5)+
+  labs(x='FI (fourth assessment centre) n correct answers - Z score')
+dev.off()
+
+```
+
+## Online 1
+```{r}
+cog %>% count(p20191_i0)
+
+
+a=subset(cog, !is.na(cog$p20191_i0))
+# Some values are coded as 14 b ut there were only 13 questions, so remove these? POssobly a coding error? 
+a$p20191_i0[a$p20191_i0==14]<-NA
+a=subset(cog, !is.na(cog$p20191_i0))
+
+a=select(a, c("Sample_ID","p20191_i0"))
+# Select first time, so if someone completed in 2014 instance (i0) take this. If not, take 2017 instance (i1)
+a$FI_online1_n_correct_answers <- a$p20191_i0
+         
+
+
+
+
+# Plot raw score
+tiff("FI_online1_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(a, aes(FI_online1_n_correct_answers))+
+  geom_histogram(binwidth=1)+
+  labs(x='FI (online 1) n correct answers')
+dev.off()
+
+
+
+# Form z score
+a$FI_online1_n_correct_answers_Zscore=((a$FI_online1_n_correct_answers
+                                                    -mean(a$FI_online1_n_correct_answers))
+                                                   /sd(a$FI_online1_n_correct_answers, na.rm = T))
+mean(a$FI_online1_n_correct_answers_Zscore)
+max(a$FI_online1_n_correct_answers_Zscore)
+min(a$FI_online1_n_correct_answers_Zscore)
+
+
+a=select(a, c(1,3,4))
+cog_z_scores = merge(cog_z_scores, a, by='Sample_ID', all = TRUE)
+
+
+# Plot z score 
+tiff("FI_online1_Zscore_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(cog_z_scores, aes(FI_online1_n_correct_answers_Zscore))+
+  geom_histogram(binwidth=0.6)+
+  labs(x='FI (online 1) n correct answers - Z score')
+dev.off()
+
+```
+
+## Save plots out
+```{r}
+system('dx upload FI*.tiff --destination ./phenotype_cohorts/processed_cognition/')
+```
+
+
+# Symbol digit substitution
+This test was completed at in-person assessment centres and online. It is a test of processing speed. Participants were presented with a key of symbols matched to numbers and asked to indicate which number matched each symbol in a grid. 
+ 
+Here, I select the number of correct matches (UKBB Field 20159 and 23324) both online and in person as outcome measures. 
+
+Because of the open-ended nature of the test it was possible to score quite well on the count of correctly matched symbols by very rapidly entering arbitrary selections to accumulate random matches. When assessing performance the number of correct matches, the number of matches attempted (UKBB Field 20195 and 23323) therefore need to be considered. Here, I exclude scores for individuals with both high scores (> ) and lots of attempted matches (> ). 
+
+## Look at data to work out cut-offs 
+```{r}
+cog %>% count(p23324_i3)
+
+a=subset(cog, !is.na(cog$p20159_i0)|
+           !is.na(cog$p20159_i1)|
+           !is.na(cog$p23324_i2))
+a=select(cog, c("Sample_ID","p20159_i1", "p20195_i1","p20159_i0", "p20195_i0", "p23324_i2", "p23323_i2"))
+
+# Plots
+tiff("SDS_AC3_n_attemptsvscorrect.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(a, aes(p23324_i2, p23323_i2)) +
+  geom_jitter() +
+  geom_abline(slope = 1, intercept = 0, color = "green", linetype = "dashed")+  # Add an x=y line (all attempts correct)
+  geom_abline(slope = 1, intercept = 25, color = "red", linetype = "dashed")+ # Add an x=y+25 line (25 more n attempts than n correct)
+  labs(x="n symbol-digit matches made correctly", y="n symbol-digit matches attempted", title = 'AC3')
+dev.off()
+
+tiff("SDS_online1_n_attemptsvscorrect.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(a, aes(p20159_i0, p20195_i0)) +
+  geom_jitter() +
+  geom_abline(slope = 1, intercept = 0, color = "green", linetype = "dashed")+  # Add an x=y line (all attempts correct)
+  geom_abline(slope = 1, intercept = 25, color = "red", linetype = "dashed")+ # Add an x=y+25 line (25 more n attempts than n correct)
+  labs(x="n symbol-digit matches made correctly", y="n symbol-digit matches attempted", title = 'Online - 1')
+dev.off()
+
+tiff("SDS_online2_n_attemptsvscorrect.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(a, aes(p20159_i1, p20195_i1)) +
+  geom_jitter() +
+  geom_abline(slope = 1, intercept = 0, color = "green", linetype = "dashed")+  # Add an x=y line (all attempts correct)
+  geom_abline(slope = 1, intercept = 25, color = "red", linetype = "dashed")+ # Add an x=y+25 line (25 more n attempts than n correct)
+  labs(x="n symbol-digit matches made correctly", y="n symbol-digit matches attempted", title = 'Online - 2')
+dev.off()
+
+
+
+
+# Recoding
+# Here write n correct and n attempts originally to cog_z_scores (might be useful to have og scores and n attempts)
+a$SDS_AC3_n_correct<-a$p23324_i2
+a$SDS_AC3_n_attempts<-a$p23323_i2
+b=select(a, c(1,8:9))
+cog_z_scores = merge(cog_z_scores, b, by='Sample_ID', all = TRUE)
+a %>% count(!is.na(SDS_AC3_n_correct)) # 45653
+a$SDS_AC3_n_correct_cons_attempts<-a$p23324_i2
+a$SDS_AC3_n_correct_cons_attempts[a$p23323_i2 > (a$p23324_i2+25)]<-NA 
+a %>% count(!is.na(SDS_AC3_n_correct_cons_attempts)) # 45603 - Recodes 50 people to NA 
+
+a$SDS_online1_n_correct<-a$p20159_i0
+a$SDS_online1_n_attempts<-a$p20195_i0
+b=select(a, c(1,11:12))
+cog_z_scores = merge(cog_z_scores, b, by='Sample_ID', all = TRUE)
+a %>% count(!is.na(SDS_online1_n_correct)) # 95298
+a$SDS_online1_n_correct_cons_attempts<-a$p20159_i0
+a$SDS_online1_n_correct_cons_attempts[a$p20195_i0 > (a$p20159_i0+25)]<-NA 
+a %>% count(!is.na(SDS_online1_n_correct_cons_attempts)) # 95269 - Recodes 29 people to NA 
+
+a$SDS_online2_n_correct<-a$p20159_i1
+a$SDS_online2_n_attempts<-a$p20195_i1
+b=select(a, c(1,14:15))
+cog_z_scores = merge(cog_z_scores, b, by='Sample_ID', all = TRUE)
+a %>% count(!is.na(SDS_online2_n_correct)) # 142169
+a$SDS_online2_n_correct_cons_attempts<-a$p20159_i1
+a$SDS_online2_n_correct_cons_attempts[a$p20195_i1 > (a$p20159_i1+25)]<-NA 
+a %>% count(!is.na(SDS_online2_n_correct_cons_attempts)) # 142052 - Recodes 117 people to NA 
+
+sds_recoded=a
+```
+
+
+## Third assessment centre (imaging visit)
+```{r}
+a=subset(sds_recoded, !is.na(sds_recoded$SDS_AC3_n_correct_cons_attempts))
+a=select(a, c("Sample_ID", "SDS_AC3_n_correct_cons_attempts"))
+
+# Plot raw score
+tiff("SDS_AC3_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(a, aes(SDS_AC3_n_correct_cons_attempts))+
+  geom_histogram(binwidth=2)+
+  labs(x='SDS (third assessment centre) n symbol-digit matches made correctly')
+dev.off()
+
+# Form z score
+a$SDS_AC3_n_correct_cons_attempts_Zscore=((a$SDS_AC3_n_correct_cons_attempts-
+                                             mean(a$SDS_AC3_n_correct_cons_attempts, na.rm = TRUE ))
+                                          /sd(a$SDS_AC3_n_correct_cons_attempts, na.rm = T))
+mean(a$SDS_AC3_n_correct_cons_attempts_Zscore, na.rm = TRUE)
+max(a$SDS_AC3_n_correct_cons_attempts_Zscore, na.rm = TRUE)
+min(a$SDS_AC3_n_correct_cons_attempts_Zscore, na.rm = TRUE)
+
+# No outlier removal needed 
+cog_z_scores = merge(cog_z_scores, a, by='Sample_ID', all = TRUE)
+
+
+# Plot z score 
+tiff("SDS_AC3_Zscore_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(cog_z_scores, aes(SDS_AC3_n_correct_cons_attempts_Zscore))+
+  geom_histogram(binwidth=0.6)+
+  labs(x='SDS (third assessment centre) n symbol-digit matches made correctly - Z score')
+dev.off()
+```
+
+## Online 1
+```{r}
+a=subset(sds_recoded, !is.na(sds_recoded$SDS_online1_n_correct_cons_attempts))
+a=select(a, c("Sample_ID", "SDS_online1_n_correct_cons_attempts"))
+
+
+# Plot raw score
+tiff("SDS_online1_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(a, aes(SDS_online1_n_correct_cons_attempts))+
+  geom_histogram(binwidth=2)+
+  labs(x='SDS (online 1) n symbol-digit matches made correctly')
+dev.off()
+
+# is skewed but hard to transform, and in trans you end up losing lots of the 0 values, which we want to avoid
+
+# Form z score
+a$SDS_online1_n_correct_cons_attempts_Zscore=((a$SDS_online1_n_correct_cons_attempts
+                                                    -mean(a$SDS_online1_n_correct_cons_attempts))
+                                                   /sd(a$SDS_online1_n_correct_cons_attempts, na.rm = T))
+mean(a$SDS_online1_n_correct_cons_attempts_Zscore)
+max(a$SDS_online1_n_correct_cons_attempts_Zscore)
+min(a$SDS_online1_n_correct_cons_attempts_Zscore)
+
+# Remove outliers (+/- 4SDs of mean)
+b=subset(a, a$SDS_online1_n_correct_cons_attempts_Zscore<4 & a$SDS_online1_n_correct_cons_attempts_Zscore>-4)
+b$SDS_online1_n_correct_cons_attempts_Zscore_outliersrm<-b$SDS_online1_n_correct_cons_attempts_Zscore
+b<-select(b, "Sample_ID", "SDS_online1_n_correct_cons_attempts_Zscore_outliersrm")
+a=merge(a, b, by='Sample_ID', all=T)
+
+# Recode outliers(+/-4SDs of mean)
+a$SDS_online1_n_correct_cons_attempts_Zscore_outliersrecoded<-a$SDS_online1_n_correct_cons_attempts_Zscore
+a$SDS_online1_n_correct_cons_attempts_Zscore_outliersrecoded[a$SDS_online1_n_correct_cons_attempts_Zscore > 4] <- 4
+a$SDS_online1_n_correct_cons_attempts_Zscore_outliersrecoded[a$SDS_online1_n_correct_cons_attempts_Zscore < -4] <- -4
+
+
+cog_z_scores = merge(cog_z_scores, a, by='Sample_ID', all = TRUE)
+
+
+# Plot z score 
+tiff("SDS_online1_Zscore_distribution.tiff", width = 12, height = 9, units = "in", res = 300)
+ggplot(cog_z_scores, aes(SDS_online1_n_correct_cons_attempts_Zscore_outliersrm))+
+  geom_histogram(binwidth=0.8)+
+  labs(x='SDS (online 1) n symbol-digit matches made correctly - Z score')
+dev.off()
+```
+
+
+
+## Save plots out
+```{r}
+system('dx upload SDS*.tiff --destination ./phenotype_cohorts/processed_cognition/')
+```
+
+
+# Prospective memory
+```{r}
+cog %>% count(p20018_i0.x)
+cog$prospective_mem_AC1<- 0
+cog$prospective_mem_AC1[cog$p20018_i0.x=='']<-NA
+cog$prospective_mem_AC1[cog$p20018_i0.x=='Correct recall on first attempt']<-1
+a=cog[,c('Sample_ID', 'prospective_mem_AC1')]
+cog_z_scores=merge(cog_z_scores, a, by='Sample_ID')
+```
+
+
+# Save table of proccessed cog scores out
+```{r}
+write.csv(cog_z_scores, 'processed_cog_tests_Feb24.csv')
+system('dx upload processed_cog_tests_Feb24.csv --destination ./phenotype_cohorts/processed_cognition/')
+
+phen=read.csv('processed_cog_tests_Feb24.csv')
+phen$eid<-phen$Sample_ID
+```
+
+# Derive g (and versions of it)
+## Main g 
+```{r}
+g_RT_TMTB_NM_PM=subset(phen, !is.na(phen$Reaction_time_AC1_mean_time_taken_Zscore_outliersrm)&
+            !is.na(phen$TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm)&
+            !is.na(phen$Numeric_memory_online_maximum_digits_remembered_Zscore)&
+            !is.na(phen$Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm))
+
+
+# Derive g
+g_RT_TMTB_NM_PM_idrm<-g_RT_TMTB_NM_PM[,c('Reaction_time_AC1_mean_time_taken_Zscore_outliersrm','TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm','Numeric_memory_online_maximum_digits_remembered_Zscore','Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm')]
+g_RT_TMTB_NM_PM.pca <- prcomp(g_RT_TMTB_NM_PM_idrm, center = TRUE,scale. = TRUE)
+summary(g_RT_TMTB_NM_PM.pca)
+
+# Extract PC1
+g_pc1 <- g_RT_TMTB_NM_PM.pca$x  # This contains all principal component scores
+pc1 <- g_pc1[, 1]  # First principal component (PC1)
+pc1_g <- data.frame(ID = g_RT_TMTB_NM_PM$eid, g_MAIN_RT_TMTB_NM_PM = pc1)
+g_RT_TMTB_NM_PM=merge(g_RT_TMTB_NM_PM, pc1_g, by.x="eid", by.y='ID')
+g_RT_TMTB_NM_PM=g_RT_TMTB_NM_PM[,c('eid','g_MAIN_RT_TMTB_NM_PM')]
+
+# Standardise by conversion to z score and remove outliers 
+g_RT_TMTB_NM_PM$g_MAIN_RT_TMTB_NM_PM_zscore = ((g_RT_TMTB_NM_PM$g_MAIN_RT_TMTB_NM_PM
+                                                    -mean(g_RT_TMTB_NM_PM$g_MAIN_RT_TMTB_NM_PM))
+                                                   /sd(g_RT_TMTB_NM_PM$g_MAIN_RT_TMTB_NM_PM))
+g_RT_TMTB_NM_PM$g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm<- g_RT_TMTB_NM_PM$g_MAIN_RT_TMTB_NM_PM_zscore
+g_RT_TMTB_NM_PM$g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm[g_RT_TMTB_NM_PM$g_MAIN_RT_TMTB_NM_PM_zscore>4]<- NA
+g_RT_TMTB_NM_PM$g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm[g_RT_TMTB_NM_PM$g_MAIN_RT_TMTB_NM_PM_zscore< -4]<- NA
+a=subset(g_RT_TMTB_NM_PM, is.na(g_RT_TMTB_NM_PM$g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm)) #23 outliers
+
+phen=merge(phen, g_RT_TMTB_NM_PM, by='eid', all=T)
+n_w_this_g=subset(phen, !is.na(phen$g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm)) # 94,872
+
+```
+
+## Leave one test out g 
+### Drop PM
+```{r}
+g_LOO=subset(phen, !is.na(phen$Reaction_time_AC1_mean_time_taken_Zscore_outliersrm)&
+            !is.na(phen$TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm)&
+            !is.na(phen$Numeric_memory_online_maximum_digits_remembered_Zscore))
+
+
+# Derive g
+g_LOO_idrm<-g_LOO[,c('Reaction_time_AC1_mean_time_taken_Zscore_outliersrm','TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm','Numeric_memory_online_maximum_digits_remembered_Zscore')]
+g_LOO.pca <- prcomp(g_LOO_idrm, center = TRUE,scale. = TRUE)
+summary(g_LOO.pca)
+
+# Extract PC1
+g_pc1 <- g_LOO.pca$x  # This contains all principal component scores
+pc1 <- g_pc1[, 1]  # First principal component (PC1)
+pc1_g <- data.frame(ID = g_LOO$eid, g_LOO_RT_TMTB_NM = pc1)
+g_LOO=merge(g_LOO, pc1_g, by.x="eid", by.y='ID')
+g_LOO=g_LOO[,c('eid','g_LOO_RT_TMTB_NM')]
+
+# Standardise by conversion to z score and remove outliers 
+g_LOO$g_LOO_RT_TMTB_NM_zscore = ((g_LOO$g_LOO_RT_TMTB_NM
+                                                    -mean(g_LOO$g_LOO_RT_TMTB_NM))
+                                                   /sd(g_LOO$g_LOO_RT_TMTB_NM))
+g_LOO$g_LOO_RT_TMTB_NM_zscore_outliersrm<- g_LOO$g_LOO_RT_TMTB_NM_zscore
+g_LOO$g_LOO_RT_TMTB_NM_zscore_outliersrm[g_LOO$g_LOO_RT_TMTB_NM_zscore>4]<- NA
+g_LOO$g_LOO_RT_TMTB_NM_zscore_outliersrm[g_LOO$g_LOO_RT_TMTB_NM_zscore< -4]<- NA 
+a=subset(g_LOO, is.na(g_LOO$g_LOO_RT_TMTB_NM_zscore_outliersrm)) #29 outliers
+
+phen=merge(phen, g_LOO, by='eid', all=T)
+n_w_this_g=subset(phen, !is.na(phen$g_LOO_RT_TMTB_NM_zscore_outliersrm))
+```
+
+### Drop TMTB
+```{r}
+g_LOO=subset(phen, !is.na(phen$Reaction_time_AC1_mean_time_taken_Zscore_outliersrm)&
+            !is.na(phen$Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm)&
+            !is.na(phen$Numeric_memory_online_maximum_digits_remembered_Zscore))
+
+
+# Derive g
+g_LOO_idrm<-g_LOO[,c('Reaction_time_AC1_mean_time_taken_Zscore_outliersrm','Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm','Numeric_memory_online_maximum_digits_remembered_Zscore')]
+g_LOO.pca <- prcomp(g_LOO_idrm, center = TRUE,scale. = TRUE)
+summary(g_LOO.pca)
+
+# Extract PC1
+g_pc1 <- g_LOO.pca$x  # This contains all principal component scores
+pc1 <- g_pc1[, 1]  # First principal component (PC1)
+pc1_g <- data.frame(ID = g_LOO$eid, g_LOO_RT_NM_PM = pc1)
+g_LOO=merge(g_LOO, pc1_g, by.x="eid", by.y='ID')
+g_LOO=g_LOO[,c('eid','g_LOO_RT_NM_PM')]
+
+# Standardise by conversion to z score and remove outliers 
+g_LOO$g_LOO_RT_NM_PM_zscore = ((g_LOO$g_LOO_RT_NM_PM
+                                                    -mean(g_LOO$g_LOO_RT_NM_PM))
+                                                   /sd(g_LOO$g_LOO_RT_NM_PM))
+g_LOO$g_LOO_RT_NM_PM_zscore_outliersrm<- g_LOO$g_LOO_RT_NM_PM_zscore
+g_LOO$g_LOO_RT_NM_PM_zscore_outliersrm[g_LOO$g_LOO_RT_NM_PM_zscore>4]<- NA
+g_LOO$g_LOO_RT_NM_PM_zscore_outliersrm[g_LOO$g_LOO_RT_NM_PM_zscore< -4]<- NA 
+a=subset(g_LOO, is.na(g_LOO$g_LOO_RT_NM_PM_zscore_outliersrm)) # 23 outliers 
+
+phen=merge(phen, g_LOO, by='eid', all=T)
+n_w_this_g=subset(phen, !is.na(phen$g_LOO_RT_NM_PM_zscore_outliersrm))
+```
+
+
+### Drop RT
+```{r}
+g_LOO=subset(phen, !is.na(phen$TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm)&
+            !is.na(phen$Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm)&
+            !is.na(phen$Numeric_memory_online_maximum_digits_remembered_Zscore))
+
+
+# Derive g
+g_LOO_idrm<-g_LOO[,c('TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm','Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm','Numeric_memory_online_maximum_digits_remembered_Zscore')]
+g_LOO.pca <- prcomp(g_LOO_idrm, center = TRUE,scale. = TRUE)
+summary(g_LOO.pca)
+
+# Extract PC1
+g_pc1 <- g_LOO.pca$x  # This contains all principal component scores
+pc1 <- g_pc1[, 1]  # First principal component (PC1)
+pc1_g <- data.frame(ID = g_LOO$eid, g_LOO_TMTB_NM_PM = pc1)
+g_LOO=merge(g_LOO, pc1_g, by.x="eid", by.y='ID')
+g_LOO=g_LOO[,c('eid','g_LOO_TMTB_NM_PM')]
+
+# Standardise by conversion to z score and remove outliers 
+g_LOO$g_LOO_TMTB_NM_PM_zscore = ((g_LOO$g_LOO_TMTB_NM_PM
+                                                    -mean(g_LOO$g_LOO_TMTB_NM_PM))
+                                                   /sd(g_LOO$g_LOO_TMTB_NM_PM))
+g_LOO$g_LOO_TMTB_NM_PM_zscore_outliersrm<- g_LOO$g_LOO_TMTB_NM_PM_zscore
+g_LOO$g_LOO_TMTB_NM_PM_zscore_outliersrm[g_LOO$g_LOO_TMTB_NM_PM_zscore>4]<- NA 
+g_LOO$g_LOO_TMTB_NM_PM_zscore_outliersrm[g_LOO$g_LOO_TMTB_NM_PM_zscore< -4]<- NA 
+a=subset(g_LOO, is.na(g_LOO$g_LOO_TMTB_NM_PM_zscore_outliersrm)) # 19 outliers 
+
+phen=merge(phen, g_LOO, by='eid', all=T)
+n_w_this_g=subset(phen, !is.na(phen$g_LOO_TMTB_NM_PM_zscore_outliersrm))
+```
+
+
+### Drop NM
+```{r}
+g_LOO=subset(phen, !is.na(phen$TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm)&
+            !is.na(phen$Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm)&
+            !is.na(phen$Reaction_time_AC1_mean_time_taken_Zscore_outliersrm))
+
+
+# Derive g
+g_LOO_idrm<-g_LOO[,c('TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm','Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm','Reaction_time_AC1_mean_time_taken_Zscore_outliersrm')]
+g_LOO.pca <- prcomp(g_LOO_idrm, center = TRUE,scale. = TRUE)
+summary(g_LOO.pca)
+
+# Extract PC1
+g_pc1 <- g_LOO.pca$x  # This contains all principal component scores
+pc1 <- g_pc1[, 1]  # First principal component (PC1)
+pc1_g <- data.frame(ID = g_LOO$eid, g_LOO_TMTB_NM_RT = pc1)
+g_LOO=merge(g_LOO, pc1_g, by.x="eid", by.y='ID')
+g_LOO=g_LOO[,c('eid','g_LOO_TMTB_NM_RT')]
+
+# Standardise by conversion to z score and remove outliers 
+g_LOO$g_LOO_TMTB_NM_RT_zscore = ((g_LOO$g_LOO_TMTB_NM_RT
+                                                    -mean(g_LOO$g_LOO_TMTB_NM_RT))
+                                                   /sd(g_LOO$g_LOO_TMTB_NM_RT))
+g_LOO$g_LOO_TMTB_NM_RT_zscore_outliersrm<- g_LOO$g_LOO_TMTB_NM_RT_zscore
+g_LOO$g_LOO_TMTB_NM_RT_zscore_outliersrm[g_LOO$g_LOO_TMTB_NM_RT_zscore>4]<- NA 
+g_LOO$g_LOO_TMTB_NM_RT_zscore_outliersrm[g_LOO$g_LOO_TMTB_NM_RT_zscore< -4]<- NA 
+a=subset(g_LOO, is.na(g_LOO$g_LOO_TMTB_NM_RT_zscore_outliersrm)) # 15 outliers 
+
+phen=merge(phen, g_LOO, by='eid', all=T)
+n_w_this_g=subset(phen, !is.na(phen$g_LOO_TMTB_NM_RT_zscore_outliersrm))
+```
+
+## Other gs
+### Main g plus FI 
+```{r}
+g_plus_FI=subset(phen, !is.na(phen$Reaction_time_AC1_mean_time_taken_Zscore_outliersrm)&
+            !is.na(phen$TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm)&
+            !is.na(phen$Numeric_memory_online_maximum_digits_remembered_Zscore)&
+            !is.na(phen$Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm)&
+            !is.na(phen$FI_AC1_n_correct_answers_Zscore))
+
+
+# Derive g
+g_plus_FI_idrm<-g_plus_FI[,c('Reaction_time_AC1_mean_time_taken_Zscore_outliersrm','TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm','Numeric_memory_online_maximum_digits_remembered_Zscore','Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm', 'FI_AC1_n_correct_answers_Zscore')]
+g_plus_FI.pca <- prcomp(g_plus_FI_idrm, center = TRUE,scale. = TRUE)
+summary(g_plus_FI.pca)
+
+# Extract PC1
+g_pc1 <- g_plus_FI.pca$x  # This contains all principal component scores
+pc1 <- g_pc1[, 1]  # First principal component (PC1)
+pc1_g <- data.frame(ID = g_plus_FI$eid, g_inc_FI = pc1)
+g_plus_FI=merge(g_plus_FI, pc1_g, by.x="eid", by.y='ID')
+g_plus_FI=g_plus_FI[,c('eid','g_inc_FI')]
+
+# Standardise by conversion to z score and remove outliers 
+g_plus_FI$g_inc_FI_zscore = ((g_plus_FI$g_inc_FI
+                                                    -mean(g_plus_FI$g_inc_FI))
+                                                   /sd(g_plus_FI$g_inc_FI))
+g_plus_FI$g_inc_FI_zscore_outliersrm<- g_plus_FI$g_inc_FI_zscore
+g_plus_FI$g_inc_FI_zscore_outliersrm[g_plus_FI$g_inc_FI_zscore>4]<- NA 
+g_plus_FI$g_inc_FI_zscore_outliersrm[g_plus_FI$g_inc_FI_zscore< -4]<- NA 
+a=subset(g_plus_FI, is.na(g_plus_FI$g_inc_FI_zscore_outliersrm)) # 3 outliers removed
+
+phen=merge(phen, g_plus_FI, by='eid', all=T)
+n_w_this_g=subset(phen, !is.na(phen$g_inc_FI_zscore_outliersrm))
+```
+
+### g:UKB-5
+```{r}
+g_UKB5=subset(phen, !is.na(phen$Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm)&
+            !is.na(phen$Reaction_time_AC1_mean_time_taken_Zscore_outliersrm)&
+            !is.na(phen$prospective_mem_AC1)&
+            !is.na(phen$Numeric_memory_online_maximum_digits_remembered_Zscore)&
+            !is.na(phen$FI_AC1_n_correct_answers_Zscore))
+
+
+# Derive g
+g_UKB5_idrm<-g_UKB5[,c('Reaction_time_AC1_mean_time_taken_Zscore_outliersrm','prospective_mem_AC1','Numeric_memory_online_maximum_digits_remembered_Zscore','Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm', 'FI_AC1_n_correct_answers_Zscore')]
+g_UKB5.pca <- prcomp(g_UKB5_idrm, center = TRUE,scale. = TRUE)
+summary(g_UKB5.pca)
+
+# Extract PC1
+g_pc1 <- g_UKB5.pca$x  # This contains all principal component scores
+pc1 <- g_pc1[, 1]  # First principal component (PC1)
+pc1_g <- data.frame(ID = g_UKB5$eid, g_UKB5_FRD = pc1)
+g_UKB5=merge(g_UKB5, pc1_g, by.x="eid", by.y='ID')
+g_UKB5=g_UKB5[,c('eid','g_UKB5_FRD')]
+
+# Standardise by conversion to z score and remove outliers 
+g_UKB5$g_UKB5_FRD_zscore = ((g_UKB5$g_UKB5_FRD
+                                                    -mean(g_UKB5$g_UKB5_FRD))
+                                                   /sd(g_UKB5$g_UKB5_FRD))
+g_UKB5$g_UKB5_FRD_zscore_outliersrm<- g_UKB5$g_UKB5_FRD_zscore
+g_UKB5$g_UKB5_FRD_zscore_outliersrm[g_UKB5$g_UKB5_FRD_zscore>4]<- NA
+g_UKB5$g_UKB5_FRD_zscore_outliersrm[g_UKB5$g_UKB5_FRD_zscore< -4]<- NA 
+a=subset(g_UKB5, is.na(g_UKB5$g_UKB5_FRD_zscore_outliersrm)) # 9 outliers removed
+
+phen=merge(phen, g_UKB5, by='eid', all=T)
+n_w_this_g=subset(phen, !is.na(phen$g_UKB5_FRD_zscore_outliersrm))
+```
+
+# Save phenotype table including g out
+```{r}
+write.csv(phen, 'processed_cog_tests_inc_g_Feb24.csv')
+system('dx upload processed_cog_tests_inc_g_Feb24.csv --destination ./phenotype_cohorts/processed_cognition/')
+
+```
+
+# Output descriptive statistics 
+```{r}
+
+# Create a list of variables you want to calculate statistics for
+variables <- setdiff(colnames(cog_z_scores), colnames(cog_z_scores)[grep("instances_instance", colnames(cog_z_scores))])
+
+# Define a function to calculate the desired statistics for each variable
+calc_stats <- function(var) {
+  data <- cog_z_scores[[var]]
+  data_clean <- na.omit(data)  # Remove NA values
+  
+  # Calculate range
+  data_range <- range(data_clean)
+  
+  # Return a data frame with the desired statistics
+  data.frame(
+    Variable = var,
+    N = length(data_clean),
+    Mean = mean(data_clean),
+    SD = sd(data_clean),  # Standard deviation
+    Min = data_range[1],  # Minimum value
+    Max = data_range[2],  # Maximum value
+    Skewness = skewness(data_clean),
+    Kurtosis = kurtosis(data_clean)
+  )
+}
+
+# Apply the calc_stats function across the selected variables and bind into a single table
+summary_table <- map_df(variables, calc_stats)
+
+write.csv(summary_table, 'descriptive_stats_processed_cog_Feb24.csv')
+system('dx upload descriptive_stats_processed_cog_Feb24.csv --destination ./phenotype_cohorts/processed_cognition/')
+```

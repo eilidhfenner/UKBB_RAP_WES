@@ -1,0 +1,112 @@
+---
+title: "17_single_gene_counts"
+output: html_document
+date: "2024-10-22"
+---
+
+# Single gene counts
+This script reads in each chromosome, filters to the genes we want to do a single gene burden test in, and writes this list out out for use in single gene regressions. This was run in a Rstudio mem2_ssd1_v2_x32 instance, and it took roughly 2 hours to run costing £2.
+## Install packages
+```{r}
+library(data.table)
+library(dplyr)
+library(purrr)
+install.packages('broom')
+library(broom)
+```
+
+
+# Set variables 
+```{r}
+AC='5orless' # run this same script with this set differently to edit AC! 
+chromosomes<-1:22
+variant_classes<-list('PTV', 'REVEL75_Miss', 'synonymous')
+
+```
+
+# Download data 
+```{r}
+# PTVs
+var<-'PTV'
+input_filename <- paste0('./Variant_counts/transposed_counts/AC', AC, '/AC', AC, '_', var,'/transposed*.tsv')
+download_command <- paste('dx download ', shQuote(input_filename))
+system(download_command)
+
+# Pathogenic missense
+var<-'REVEL75_Miss'
+input_filename <- paste0('./Variant_counts/transposed_counts/AC', AC, '/AC', AC, '_', var,'/transposed*.tsv')
+download_command <- paste('dx download ', shQuote(input_filename))
+system(download_command)
+
+# Synonymous variants
+var<-'synonymous'
+input_filename <- paste0('./Variant_counts/transposed_counts/AC', AC, '/AC', AC, '_', var,'/transposed*.tsv')
+download_command <- paste('dx download ', shQuote(input_filename))
+system(download_command)
+
+
+# Gene set annotations
+system('dx download ./Variant_counts/Gene_sets/gene_sets_for_RAP_copying200k.csv')
+system('dx download ./gene_sets_for_RAP_Feb25.csv')
+sets=read.csv('gene_sets_for_RAP_Feb25.csv')
+set=subset(sets, sets$SZ_GWAS_credible_causal==T |
+                 sets$NDD_CNV_gene==T | 
+                 sets$SCHEMA_FDR5_gene==T)
+list=set$gene_id
+```
+
+# Count
+```{r}
+# Count
+for (var in variant_classes){
+  print(paste0('Running variant class ', var))
+  for (chr in chromosomes) {
+    # Process chr1 differently (as it's in 2 halves)
+    if (chr==1) {
+        # Read in 
+        first_half <- paste0('transposed_chr_1_first_half_', var, '_AC', AC,'_gene_counts.tsv')
+        first_half <- fread(first_half, header=TRUE, stringsAsFactors=FALSE)
+        second_half <- paste0('transposed_chr_1_second_half_', var, '_AC', AC,'_gene_counts.tsv')
+        second_half <- fread(second_half, header=TRUE, stringsAsFactors=FALSE)
+
+        # Merge to one table and add up the gene split across the two halves
+        chr1 <- merge(first_half, second_half, by = "Sample_ID")
+        chr1$ENSG00000198758 <- chr1$ENSG00000198758.x + chr1$ENSG00000198758.y
+        chr1 <- chr1 %>% select(-ENSG00000198758.x, -ENSG00000198758.y)
+        cat('n genes in chr 1:', length(chr1) - 1, '\n')
+        
+        
+        # Filter to your gene set 
+        chr1 <- chr1 %>% select(c("Sample_ID", any_of(list)))
+        cat('n genes in chr 1 in set:', length(chr1) - 1, '\n')
+        single_genes<-chr1
+        # Clean
+        rm(chr1)
+        rm(first_half)
+        rm(second_half)
+        gc()
+    }
+    else {
+        # All other chromosomes
+        filename <- paste0('transposed_chr_', chr, '_', var, '_AC', AC,'_gene_counts.tsv')
+        input <- fread(filename, header=TRUE, stringsAsFactors=FALSE)
+        print(paste0('Processing chr ', chr))
+        cat('n genes in chr:', length(input) - 1, '\n')
+        # Filter the columns to keep only the genes present in the gene list
+        chr_set <- input %>% select(c("Sample_ID", any_of(list)))
+        cat('n genes in set in chr:' , length(chr_set) -1, '\n')
+        single_genes<-merge(single_genes, chr_set, by='Sample_ID')
+        # Clear mem
+        rm(input)
+        rm(chr_set)
+        gc()
+      }
+  }
+  output <- paste0(setname, '_', var, '_AC', AC, '_counts.csv')
+  write.csv(single_genes, output)
+  
+  upload_command <- paste('dx upload ', output, '--destination ./Variant_counts/Gene_sets/')
+  system(upload_command)
+}
+
+```
