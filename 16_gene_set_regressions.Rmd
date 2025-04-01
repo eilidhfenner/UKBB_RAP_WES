@@ -93,8 +93,28 @@ phen=merge(phen, covars, by.x='eid', by.y='eid')
 ## Diagnoses 
 These phenotypes were selected in cohort browser and written out using the Table Exporter tool. 
 ```{r}
-system('dx download ./phenotypes_cog_diagnoses_participation_death.csv')
-diagnoses=read.csv('phenotypes_cog_diagnoses_participation_death.csv', header=T)
+system('dx download ./phenotype_cohorts/participation_diagnoses_participant.csv')
+diagnoses=read.csv('participation_diagnoses_participant.csv', header=T)
+
+phen %>% count(p130875)
+phen$SZ<-T
+phen$SZ[phen$p130875=='']<-F
+phen %>% count(SZ)
+
+phen %>% count(p130951)
+phen$intellectual_disability<-T
+phen$intellectual_disability[phen$p130951=='' &
+                               phen$p130953=='' &
+                               phen$p130955==''&
+                               phen$p130959==''&
+                               phen$p130961=='']<-F
+phen %>% count(intellectual_disability)
+
+phen %>% count(p130971)
+phen$ASD<-T
+phen$ASD[phen$p130971=='']<-F
+phen %>% count(ASD)
+
 
 # Make subset of people diagnosed with SZ - to run these regressions in if powered? 
 sz_diagnosed=subset(diagnoses, diagnoses$SZ==T) 
