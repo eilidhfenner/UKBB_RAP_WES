@@ -22,14 +22,14 @@ results <- results %>% select(-1)
 
 results <- results %>%
   mutate(ann = case_when(
-    grepl("PTV", indep_var) ~ "PTV",
-    grepl("REVEL75_", indep_var) ~ "Deleterious missense",
-    grepl("synon", indep_var) ~ "Synonymous",
+    grepl("PTV", indep_var) ~ "PTV  ",
+    grepl("REVEL75_", indep_var) ~ "Deleterious missense  ",
+    grepl("synon", indep_var) ~ "Synonymous  ",
     TRUE ~ NA_character_
   )) %>%
-  mutate(ann = factor(ann, levels = c("PTV", 
-                                      "Deleterious missense",
-                                      "Synonymous")))
+  mutate(ann = factor(ann, levels = c("PTV  ", 
+                                      "Deleterious missense  ",
+                                      "Synonymous  ")))
 
 results %>% count(ancestry)
 all_results=results
@@ -67,37 +67,8 @@ cognitive_covars=subset(all_results,
 ```
 
 
-# Supplementary Figure 1 - main findings summary
-```{r}
-gg=subset(main_sets_eur_results, main_sets_eur_results$gene_set=='pLI_0.9'| 
-            main_sets_eur_results$gene_set=='SZ_GWAS_credible_causal_US' |
-            main_sets_eur_results$gene_set=='SCHEMA_FDR_US')
-gg$Set[gg$gene_set=='pLI_0.9']<-'Constrained genes' 
-gg$Set[gg$gene_set=='SZ_GWAS_credible_causal_US']<-'Credible causal \n schizophrenia GWAS genes' 
-gg$Set[gg$gene_set=='SCHEMA_FDR_US']<-'Genes enriched for rare coding \n  variants in schizophrenia' 
-
-gg=subset(gg, gg$ann != 'Synonymous')
-
-gg<- gg %>% mutate(Set = factor(Set, levels = c('Credible causal \n schizophrenia GWAS genes',
-                                                'Genes enriched for rare coding \n  variants in schizophrenia', 
-                                                'Constrained genes' )))
-
-tiff("/Users/c1928239/OneDrive - Cardiff University/Cardiff/UKBB RAP work/main_findings_SF1.tiff", units="in", width=18, height=5, res=400)
-ggplot(gg, aes(y=Set, x=beta, colour = ann, group=ann, shape=ann))  +
-  geom_pointrange(aes(xmin=lower_CI, xmax=upper_CI), position = position_dodge(width = 0.55), size=2.5)+
-  geom_vline(xintercept=0, linetype="dotted")+
-  theme_light()+
-  theme(text=element_text(size=30))+
-  labs(x=y_title, y="Gene set", colour = 'Rare variant class', shape = 'Rare variant class')+
-  theme(legend.position="bottom")+
-  theme(legend.text = element_text(size=20))
-dev.off()
-
-
-```
-
 # Constraint
-## Figure 1 - eur ancs 
+## Figure 3 - 1KPG-EUR-like ancs 
 ```{r}
 # Lofi and lof tol in one plot
 gg=subset(main_sets_eur_results, main_sets_eur_results$gene_set=='non_constrained_pLI_lessthan0.9'| main_sets_eur_results$gene_set=='pLI_0.9')
@@ -108,13 +79,15 @@ gg$Set[gg$gene_set=='pLI_0.9']<-'LoF-intolerant genes'
 
 tiff("/Users/c1928239/OneDrive - Cardiff University/Cardiff/UKBB RAP work/LoF-tolerantandintolerant_AC5orless_assocs_EU_ancs.tiff", units="in", width=12, height=10, res=400)
 ggplot(gg, aes(y=beta, x=Set, colour = ann, group=ann, shape=ann))  +
-  geom_pointrange(aes(ymin=lower_CI, ymax=upper_CI), position = position_dodge(width = 0.55), size=2.5)+
-  geom_hline(yintercept=0, linetype="dotted")+
-  theme_light()+
-  theme(text=element_text(size=25))+
-  labs(y=y_title, x="\n Gene set", colour = 'Rare variant class', shape = 'Rare variant class')+
-  theme(legend.position="bottom")+
-  theme(legend.text = element_text(size=20))
+  geom_pointrange(aes(ymin=lower_CI, ymax=upper_CI), position = position_dodge(width = 0.55), size=2.5) +
+  geom_hline(yintercept=0, linetype="dotted") +
+  theme_light() +
+  theme(text=element_text(size=25)) +
+  labs(y=y_title, x="\n Gene set", colour = 'Rare variant class  ', shape = 'Rare variant class  ') +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size=20),
+    legend.title = element_text(face="bold", size=22))
 dev.off()
 
 # Z test comparing pathogenic missense in LoFi to pathogenic missense in LoF-tol
@@ -123,7 +96,7 @@ gg$z_val<-(((-0.03982036) - gg$beta)/sqrt((0.006854876)^2 + (gg$SE)^2))
 gg$z_test_p<-1-pnorm(abs(gg$z_val),0,1) # Chec the one for revel.75 ==0.5
 ```
 
-## Sex strat - supp figure 4
+## Sex strat - supp figure 2
 ```{r}
 gg=subset(sex_strat_lofi_results, sex_strat_lofi_results$gene_set=='pLI_0.9')
 gg$sex[gg$ancestry=='EUR_only']<-'Both sexes'
@@ -136,31 +109,10 @@ ggplot(gg, aes(y=beta, x=ann, colour = ann, group=sex, shape=sex))  +
   geom_hline(yintercept=0, linetype="dotted")+
   theme_light()+
   theme(text=element_text(size=25))+
-  labs(y=y_title, x="\n Variant class")+
+  labs(y=y_title, x="\n Variant class \n")+
   theme(legend.position="bottom")+
   theme(legend.text = element_text(size=20))+
   guides(colour=guide_legend(title=NULL))  
-dev.off()
-
-```
-## Brain expression (do we want a section on this?)
-```{r}
-# Lofi and lof tol in one plot
-gg=subset(main_sets_eur_results, main_sets_eur_results$gene_set=='brain_expressed'| main_sets_eur_results$gene_set=='non_brain_expressed')
-gg$Set[gg$gene_set=='brain_expressed']<-'Brain expressed genes' 
-gg$Set[gg$gene_set=='non_brain_expressed']<-'Non-brain expressed genes' 
-
-
-
-tiff("/Users/c1928239/OneDrive - Cardiff University/Cardiff/UKBB RAP work/LoF-tolerantandintolerant_AC5orless_assocs_EU_ancs.tiff", units="in", width=12, height=10, res=400)
-ggplot(gg, aes(y=beta, x=Set, colour = ann, group=ann, shape=ann))  +
-  geom_pointrange(aes(ymin=lower_CI, ymax=upper_CI), position = position_dodge(width = 0.55), size=2.5)+
-  geom_hline(yintercept=0, linetype="dotted")+
-  theme_light()+
-  theme(text=element_text(size=25))+
-  labs(y=y_title, x="\n Gene set", colour = 'Rare variant class', shape = 'Rare variant class')+
-  theme(legend.position="bottom")+
-  theme(legend.text = element_text(size=20))
 dev.off()
 
 ```
@@ -187,71 +139,8 @@ gg=subset(main_sets_eur_results, main_sets_eur_results$gene_set=='brain_expresse
 
 ```
 
-## Covarying for individual cognitive tests
-### When g is outcome measure
-```{r}
-gg=subset(cognitive_covars, cognitive_covars$dep_var=='g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm')
-gg=subset(gg, gg$ann!='Synonymous')
 
-```
-
-### Other outcome measures
-```{r}
-gg=read.csv('/Users/c1928239/OneDrive - Cardiff University/Cardiff/UKBB RAP work/results_diff_outcomes_covarg_regressions_AC5orless.csv')
-subset(cognitive_covars, cognitive_covars$dep_var!='g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm')
-gg=subset(gg, gg$indep_var!='synonymous_AC5orless_pLI_0.9_total')
-
-```
-
-
-
-## SF5 - LoFi across ancestries 
-```{r}
-# Lofi and lof tol in one plot
-gg=Anc_specific_lofi_results
-gg$Genetic_ancestry[gg$ancestry=="AAC_ancs"]<-'1KGP-AAC-like \n (305 people \n with g)'
-gg$Genetic_ancestry[gg$ancestry=="ADM_ancs"]<-'Admixed \n (92 people \n with g)'
-gg$Genetic_ancestry[gg$ancestry=="SAS_ancs"]<-'1KGP-SAS-like \n (665 people \n with g)'
-gg$Genetic_ancestry[gg$ancestry=="SSA_ancs"]<-'1KGP-SSA-like \n (147 people \n with g)'
-gg$Genetic_ancestry[gg$ancestry=="EAS_ancs"]<-'1KGP-EAS-like \n (293 people \n with g)'
-gg$Genetic_ancestry[gg$ancestry=="LAT_ancs"]<-'1KGP-LAT-like \n (93 people \n with g)'
-gg$Genetic_ancestry[gg$ancestry=="EUR_only"]<-'1KGP-EUR-like \n (75,188 people \n with g)'
-
-gg<- gg %>% mutate(Genetic_ancestry = factor(Genetic_ancestry, levels = c('1KGP-EUR-like \n (75,188 people \n with g)',
-                                                                          '1KGP-SAS-like \n (665 people \n with g)',
-                                                                          '1KGP-AAC-like \n (305 people \n with g)',
-                                                                          '1KGP-EAS-like \n (293 people \n with g)',
-                                                                          '1KGP-SSA-like \n (147 people \n with g)',
-                                                                          '1KGP-LAT-like \n (93 people \n with g)',
-                                                                          'Admixed \n (92 people \n with g)')))
-
-
-
-
-tiff("/Users/c1928239/OneDrive - Cardiff University/Cardiff/UKBB RAP work/LoFi_AC5orless_across_ancs.tiff", units="in", width=12, height=10, res=400)
-ggplot(gg, aes(y=beta, x=Genetic_ancestry, colour = ann, group=ann, shape=ann))  +
-  geom_pointrange(aes(ymin=lower_CI, ymax=upper_CI), position = position_dodge(width = 0.55), size=1.8)+
-  geom_hline(yintercept=0, linetype="dotted")+
-  theme_light()+
-  theme(text=element_text(size=25))+
-  labs(y=y_title, x="\n Genetic ancestry", colour = 'Rare variant class', shape = 'Rare variant class')+
-  theme(legend.position="bottom")+
-  theme(legend.text = element_text(size=20),
-        axis.text.x = element_text(size = 15))
-dev.off()
-
-# Z tests
-gg=subset(gg, gg$ann=="PTV")
-gg$z_val<-(((-0.0622877047) - gg$beta)/sqrt((0.007383138)^2 + (gg$SE)^2))
-gg$z_test_p<-1-pnorm(abs(gg$z_val),0,1) # Chec the one for revel.75 ==0.5
-
-gg=Anc_specific_lofi_results
-gg=subset(gg, gg$ann=="Deleterious missense")
-gg$z_val<-(((-0.039820357) - gg$beta)/sqrt((0.006854876)^2 + (gg$SE)^2))
-gg$z_test_p<-1-pnorm(abs(gg$z_val),0,1) # Chec the one for revel.75 ==0.5
-```
-
-# Figure 2 - SCHEMA FDR genes 
+# Figure 4 - SCHEMA FDR genes 
 ```{r}
 gg=subset(results, results$gene_set=='SCHEMA_FDR_US')
 gg$Set<-'SCHEMA FDR < 5% genes'
@@ -262,18 +151,44 @@ ggplot(gg, aes(y=beta, x=Set, colour = ann, group=ann, shape=ann))  +
   geom_hline(yintercept=0, linetype="dotted")+
   theme_light()+
   theme(text=element_text(size=25))+
-  labs(y=y_title, x="\n Gene set", colour = 'Rare variant class', shape = 'Rare variant class')+
-  theme(legend.position="bottom")+
-  theme(legend.text = element_text(size=20))
+  labs(y=y_title, x="\n Gene set", colour = 'Rare variant class  ', shape = 'Rare variant class  ') +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size=20),
+    legend.title = element_text(face="bold", size=22))
 dev.off()
+  
+
 
 # And z test 
+## lofi vs schema
 gg=subset(results, results$gene_set=='SCHEMA_FDR_US'|  results$gene_set=='LoFi_minus_SCHEMA_FDR_US')
-z=subset(gg, gg$ann=="PTV")
+z=subset(gg, gg$ann=="PTV  ")
+z$z_val<-(((-0.24488849) - z$beta)/sqrt((0.068588162)^2 + (z$SE)^2))
+z$z_test_p<-1-pnorm(abs(z$z_val),0,1) # Chec the one for revel.75 ==0.5
+# brain expression vs schema
+gg=subset(results, results$gene_set=='SCHEMA_FDR_US'|  results$gene_set=='BE_minus_SCHEMA_FDR_US')
+z=subset(gg, gg$ann=="PTV  ")
+z$z_val<-(((-0.24488849) - z$beta)/sqrt((0.068588162)^2 + (z$SE)^2))
+z$z_test_p<-1-pnorm(abs(z$z_val),0,1) # Chec the one for revel.75 ==0.5
+
+
+
+# Table SCHEMA and LoFi schema 
+gg=subset(results, results$gene_set=='SCHEMA_FDR_US' | results$gene_set=='LoFi_and_SCHEMA_FDR_US')
+
+
+
+
+# Table SCHEMA and LoFi schema 
+gg=subset(results, results$gene_set=='SCHEMA_FDR_US' | results$gene_set=='BE_and_SCHEMA_FDR_US')
+
+# And z test 
+z=subset(gg, gg$ann=="PTV  ")
 z$z_val<-(((-0.24488849) - z$beta)/sqrt((0.068588162)^2 + (z$SE)^2))
 z$z_test_p<-1-pnorm(abs(z$z_val),0,1) # Chec the one for revel.75 ==0.5
 ```
-# Figure 4 -  GWAS genes
+# Figure 5 -  GWAS genes
 ```{r}
 # three sets in one plot
 gg=subset(results, results$gene_set=='SZ_GWAS_closest'| results$gene_set=='SZ_GWAS_all' | results$gene_set=='SZ_GWAS_credible_causal_US')
@@ -293,9 +208,11 @@ ggplot(gg, aes(y=beta, x=Set, colour = ann, group=ann, shape=ann))  +
   geom_hline(yintercept=0, linetype="dotted")+
   theme_light()+
   theme(text=element_text(size=25))+
-  labs(y=y_title, x="\n Gene set", colour = 'Rare variant class', shape = 'Rare variant class')+
-  theme(legend.position="bottom")+
-  theme(legend.text = element_text(size=20))
+  labs(y=y_title, x="\n Gene set", colour = 'Rare variant class  ', shape = 'Rare variant class  ') +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size=20),
+    legend.title = element_text(face="bold", size=22))
 dev.off()
 
 # Additional sets
@@ -328,7 +245,7 @@ z$z_val<-(((-0.11816858) - z$beta)/sqrt((0.05911149)^2 + (z$SE)^2))
 z$z_test_p<-1-pnorm(abs(z$z_val),0,1) # Chec the one for revel.75 ==0.5
 ```
 
-# Supplementary FIgure 6
+# Supplementary FIgure 3
 ```{r}
 gg=subset(results, results$gene_set=='SZ_GWAS_credible_causal_US'| 
             results$gene_set=='Finemap_prioritised_GWAS' | 
@@ -348,15 +265,17 @@ ggplot(gg, aes(y=beta, x=Set, colour = ann, group=ann, shape=ann))  +
   geom_hline(yintercept=0, linetype="dotted")+
   theme_light()+
   theme(text=element_text(size=25))+
-  labs(y=y_title, x="\n Gene set", colour = 'Rare variant class', shape = 'Rare variant class')+
-  theme(legend.position="bottom")+
-  theme(legend.text = element_text(size=20))
+  labs(y=y_title, x="\n Gene set", colour = 'Rare variant class  ', shape = 'Rare variant class  ') +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size=20),
+    legend.title = element_text(face="bold", size=22))
 dev.off()
 
 ```
 
 
-# Figure 5 - CNVs
+# Figure 6 - CNVs
 ```{r}
 # three sets in one plot
 gg=subset(results, results$gene_set=='NDD_CNVs_US' | results$gene_set=='LoFi_in_NDD_CNVs_US' | results$gene_set=='LoFtolerant_in_NDD_CNVs_US')
@@ -376,9 +295,11 @@ ggplot(gg, aes(y=beta, x=Set, colour = ann, group=ann, shape=ann))  +
   geom_hline(yintercept=0, linetype="dotted")+
   theme_light()+
   theme(text=element_text(size=25))+
-  labs(y=y_title, x="\n Gene set", colour = 'Rare variant class', shape = 'Rare variant class')+
-  theme(legend.position="bottom")+
-  theme(legend.text = element_text(size=20))
+  labs(y=y_title, x="\n Gene set", colour = 'Rare variant class  ', shape = 'Rare variant class  ') +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size=20),
+    legend.title = element_text(face="bold", size=22))
 dev.off()
 
 # And z tests
@@ -479,18 +400,6 @@ univar <- univar %>% mutate(Variant_type = factor(Variant_type, levels = c("Rare
                                                 "Schizophrenia \n PRS")))
                                                 
 
-
-tiff("/Users/c1928239/OneDrive - Cardiff University/Cardiff/UKBB RAP work/diff_var_classes_betas_EU_ancs.tiff", units="in", width=12, height=10, res=400)
-ggplot(univar, aes(y=Beta, x=Variant_type))  +
-  geom_pointrange(aes(ymin=Lower.CI, ymax=Upper.CI), position = position_dodge(width = 0.55), size=2.5)+
-  geom_hline(yintercept=0, linetype="dotted")+
-  theme_light()+
-  theme(text=element_text(size=25))+
-  labs(y=y_title, x="\n Variant type")+
-  theme(legend.position="bottom")+
-  theme(legend.text = element_text(size=20),
-        axis.text.x = element_text(size=10))
-dev.off()
 
 ```
 
