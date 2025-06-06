@@ -470,15 +470,34 @@ gene_sets=merge(gene_sets, schema, by.x='gene_id', by.y='ensembl_gene_id', all=T
 # Constrained and SCHEMA 
 gene_sets$pli_constrained_SCHEMA_FDR5_gene<-F
 gene_sets$pli_constrained_SCHEMA_FDR5_gene[gene_sets$pLI_constrained==T & gene_sets$SCHEMA_FDR5_gene==T] <- T
-gene_sets %>% count(pli_constrained_SCHEMA_FDR5_gene) # 21 (but check if any are in X chromosome!!)
+gene_sets %>% count(pli_constrained_SCHEMA_FDR5_gene)
 
-a=subset(gene_sets, gene_sets$pli_constrained_SCHEMA_FDR5_gene==T)
+# Non-constrained and SCHEMA 
+gene_sets$nonconstrained_SCHEMA_FDR5_gene<-F
+gene_sets$nonconstrained_SCHEMA_FDR5_gene[gene_sets$pLI_constrained==F & gene_sets$SCHEMA_FDR5_gene==T] <- T
+gene_sets %>% count(nonconstrained_SCHEMA_FDR5_gene)
+
 
 # Constrained not SCHEMA
 gene_sets$pli_constrained_NOT_SCHEMA_FDR5_gene<-F
 gene_sets$pli_constrained_NOT_SCHEMA_FDR5_gene[gene_sets$pLI_constrained==T & is.na(gene_sets$SCHEMA_FDR5_gene)] <- T
-gene_sets %>% count(pli_constrained_NOT_SCHEMA_FDR5_gene) #3,153 
+gene_sets %>% count(pli_constrained_NOT_SCHEMA_FDR5_gene) 
 
+
+```
+
+## Annotate Brain expressed and SCHEMA together
+```{r}
+# Constrained and SCHEMA 
+gene_sets$BE_SCHEMA_FDR5_gene<-F
+gene_sets$BE_SCHEMA_FDR5_gene[gene_sets$Brain_expressed==T & gene_sets$SCHEMA_FDR5_gene==T] <- T
+gene_sets %>% count(BE_SCHEMA_FDR5_gene)
+
+
+# Brain expressed not SCHEMA
+gene_sets$BE_NOT_SCHEMA_FDR5_gene<-F
+gene_sets$BE_NOT_SCHEMA_FDR5_gene[gene_sets$Brain_expressed==T & is.na(gene_sets$SCHEMA_FDR5_gene)] <- T
+gene_sets %>% count(BE_NOT_SCHEMA_FDR5_gene) 
 
 ```
 
@@ -486,4 +505,40 @@ gene_sets %>% count(pli_constrained_NOT_SCHEMA_FDR5_gene) #3,153
 And then copy this on to the RAP! 
 ```{r}
 write.csv(gene_sets, '/Users/c1928239/Downloads/gene_sets_for_RAP_Feb25.csv')
+```
+
+# Checks 
+```{r}
+sets=read.csv('/Users/c1928239/OneDrive - Cardiff University/Cardiff/gene_sets/gene_sets_for_RAP_Feb25.csv')
+
+sets <- sets %>%
+  mutate(
+    gene = coalesce(gene, !!!sets[, c(27, 28, 30, 31, 48, 49, 51, 52)])
+  ) %>%
+  select(-c(27, 28, 30, 31, 48, 49, 51, 52))  # drop the columns
+
+sets=sets[c(2:20,22:46)]
+sets$SZ_GWAS_gene[is.na(sets$SZ_GWAS_gene)]<-F
+sets$SZ_GWAS_closest_indexed_SNP[is.na(sets$SZ_GWAS_closest_indexed_SNP)]<-F
+sets$SZ_GWAS_credible_causal[is.na(sets$SZ_GWAS_credible_causal)]<-F
+sets$SZ_GWAS_SMR_prior[is.na(sets$SZ_GWAS_SMR_prior)]<-F
+sets$SZ_GWAS_Finemap_prior[is.na(sets$SZ_GWAS_Finemap_prior)]<-F
+sets$NDD_CNV_gene[is.na(sets$NDD_CNV_gene)]<-F
+sets$SZ_CNV_gene[is.na(sets$SZ_CNV_gene)]<-F
+sets$SCHEMA_FDR5_gene[is.na(sets$SCHEMA_FDR5_gene)]<-F
+sets$SCHEMA_GWS_gene[is.na(sets$SCHEMA_GWS_gene)]<-F
+
+
+sets$SCHEMA_FDR5_gene[sets$gene=='H1-4']<- F
+sets$SCHEMA_FDR5_gene[sets$gene=='PITRM1']<- F
+
+
+a=subset(sets, sets$SCHEMA_FDR5_gene==T)
+a=subset(a, !is.na(a$chromosome))
+
+b=subset(a, a$pLI_constrained==T)
+
+write.csv(sets, '/Users/c1928239/Downloads/gene_sets_Feb25.csv')
+
+
 ```
