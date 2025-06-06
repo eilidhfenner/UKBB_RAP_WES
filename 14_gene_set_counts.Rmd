@@ -969,6 +969,89 @@ for (var in variant_classes){
 
 
 
+## LoFtol and SCHEMA FDR5 
+```{r}
+setname='LoFtol_and_SCHEMA_FDR_US'
+set=subset(sets, sets$nonconstrained_SCHEMA_FDR5_gene==T) 
+list=set$gene_id
+
+for (var in variant_classes){
+  print(paste0('Running variant class ', var))
+  for (chr in chromosomes) {
+    # Process chr1 differently (as it's in 2 halves)
+    if (chr==1) {
+        # Read in 
+        first_half <- paste0('transposed_chr_1_first_half_', var, '_AC', AC,'_gene_counts.tsv')
+        first_half <- fread(first_half, header=TRUE, stringsAsFactors=FALSE)
+        second_half <- paste0('transposed_chr_1_second_half_', var, '_AC', AC,'_gene_counts.tsv')
+        second_half <- fread(second_half, header=TRUE, stringsAsFactors=FALSE)
+
+        # Merge to one table and add up the gene split across the two halves
+        chr1 <- merge(first_half, second_half, by = "Sample_ID")
+        chr1$ENSG00000198758 <- chr1$ENSG00000198758.x + chr1$ENSG00000198758.y
+        chr1 <- chr1 %>% select(-ENSG00000198758.x, -ENSG00000198758.y)
+        cat('n genes in chr 1:', length(chr1) - 1, '\n')
+        
+        # Filter to your gene set 
+        chr1 <- chr1 %>% select(c("Sample_ID", any_of(list)))
+        cat('n genes in chr 1 in set:', length(chr1) - 1, '\n')
+        # Only proceed if there are genes in the filtered set
+        if (ncol(chr1) > 1) {
+            chr1[[paste0("chr_1_", var, "_AC", AC, "_total")]] <- rowSums(chr1[,-1])
+            geneset <- select(chr1, c("Sample_ID", paste0("chr_1_", var, "_AC", AC, "_total")))
+        } else {
+            cat("No genes from the gene set found in chr 1.\n")
+        }
+        rm(chr1)
+        rm(first_half)
+        rm(second_half)
+        gc()
+    }
+    else {
+        # All other chromosomes
+        filename <- paste0('transposed_chr_', chr, '_', var, '_AC', AC,'_gene_counts.tsv')
+        input <- fread(filename, header=TRUE, stringsAsFactors=FALSE)
+        print(paste0('Processing chr ', chr))
+        cat('n genes in chr:', length(input) - 1, '\n')
+        # Filter the columns to keep only the genes present in the gene list
+        chr_set <- input %>% select(c("Sample_ID", any_of(list)))
+        cat('n genes in set in chr:' , length(chr_set) -1, '\n')
+        # Add up variants in genes in set 
+        if (ncol(chr_set) > 1) {
+            chr_set[[paste0("chr_", chr, "_", var, "_AC", AC, "_total")]] <- rowSums(chr_set[,-1])
+            chr_set <- select(chr_set, c("Sample_ID", paste0("chr_", chr, "_", var, "_AC", AC, "_total")))
+            
+            # Merge to big table and print length (to show increasing in size!!)
+            geneset <- merge(geneset, chr_set, by='Sample_ID', all=TRUE)  
+            # 'all=TRUE' to retain all rows in case one file is missing data
+            cat('n vars in set in chr:', sum(geneset[[paste0("chr_", chr, "_", var, "_AC", AC, "_total")]]), '\n')
+        } else {
+            cat("No genes from the gene set found in chr", chr, ".\n")
+        }
+        
+        # Clear mem
+        rm(input)
+        rm(chr_set)
+        gc()}
+    }
+
+  # Add up across all chromosomes 
+  geneset[[paste0(var,"_AC", AC, "_", setname, "_total")]] <- rowSums(geneset[,-1])
+  geneset <- select(geneset, c("Sample_ID", paste0(var,"_AC", AC, "_", setname, "_total")))
+  print(sum(geneset[[2]]))
+
+  # Save out 
+  output <- paste0(setname, '_', var, '_AC', AC, '_counts.csv')
+  write.csv(geneset, output)
+
+
+  upload_command <- paste('dx upload ', output, '--destination ./Variant_counts/Gene_sets/')
+  system(upload_command)
+}
+
+```
+
+
 ## LoFi and SCHEMA FDR5 
 ```{r}
 setname='LoFi_and_SCHEMA_FDR_US'
@@ -1051,7 +1134,185 @@ for (var in variant_classes){
 
 ```
 
+## Brain expressed and SCHEMA 
+```{r}
+#sets$BE_SCHEMA_FDR5_gene<-F
+#sets$BE_SCHEMA_FDR5_gene[sets$Brain_expressed==T & sets$SCHEMA_FDR5_gene==T] <- T
+#sets %>% count(BE_SCHEMA_FDR5_gene) 
 
+setname='BE_and_SCHEMA_FDR_US'
+set=subset(sets, sets$BE_SCHEMA_FDR5_gene==T) 
+# Filter to only genes with a gene id (as this is what we'll match on)
+list=set$gene_id
+
+
+# Count
+for (var in variant_classes){
+  print(paste0('Running variant class ', var))
+  for (chr in chromosomes) {
+    # Process chr1 differently (as it's in 2 halves)
+    if (chr==1) {
+        # Read in 
+        first_half <- paste0('transposed_chr_1_first_half_', var, '_AC', AC,'_gene_counts.tsv')
+        first_half <- fread(first_half, header=TRUE, stringsAsFactors=FALSE)
+        second_half <- paste0('transposed_chr_1_second_half_', var, '_AC', AC,'_gene_counts.tsv')
+        second_half <- fread(second_half, header=TRUE, stringsAsFactors=FALSE)
+
+        # Merge to one table and add up the gene split across the two halves
+        chr1 <- merge(first_half, second_half, by = "Sample_ID")
+        chr1$ENSG00000198758 <- chr1$ENSG00000198758.x + chr1$ENSG00000198758.y
+        chr1 <- chr1 %>% select(-ENSG00000198758.x, -ENSG00000198758.y)
+        cat('n genes in chr 1:', length(chr1) - 1, '\n')
+        
+        # Filter to your gene set 
+        chr1 <- chr1 %>% select(c("Sample_ID", any_of(list)))
+        cat('n genes in chr 1 in set:', length(chr1) - 1, '\n')
+        # Only proceed if there are genes in the filtered set
+        if (ncol(chr1) > 1) {
+            chr1[[paste0("chr_1_", var, "_AC", AC, "_total")]] <- rowSums(chr1[,-1])
+            geneset <- select(chr1, c("Sample_ID", paste0("chr_1_", var, "_AC", AC, "_total")))
+        } else {
+            cat("No genes from the gene set found in chr 1.\n")
+        }
+        rm(chr1)
+        rm(first_half)
+        rm(second_half)
+        gc()
+    }
+    else {
+        # All other chromosomes
+        filename <- paste0('transposed_chr_', chr, '_', var, '_AC', AC,'_gene_counts.tsv')
+        input <- fread(filename, header=TRUE, stringsAsFactors=FALSE)
+        print(paste0('Processing chr ', chr))
+        cat('n genes in chr:', length(input) - 1, '\n')
+        # Filter the columns to keep only the genes present in the gene list
+        chr_set <- input %>% select(c("Sample_ID", any_of(list)))
+        cat('n genes in set in chr:' , length(chr_set) -1, '\n')
+        # Add up variants in genes in set 
+        if (ncol(chr_set) > 1) {
+            chr_set[[paste0("chr_", chr, "_", var, "_AC", AC, "_total")]] <- rowSums(chr_set[,-1])
+            chr_set <- select(chr_set, c("Sample_ID", paste0("chr_", chr, "_", var, "_AC", AC, "_total")))
+            
+            # Merge to big table and print length (to show increasing in size!!)
+            geneset <- merge(geneset, chr_set, by='Sample_ID', all=TRUE)  
+            # 'all=TRUE' to retain all rows in case one file is missing data
+            cat('n vars in set in chr:', sum(geneset[[paste0("chr_", chr, "_", var, "_AC", AC, "_total")]]), '\n')
+        } else {
+            cat("No genes from the gene set found in chr", chr, ".\n")
+        }
+        
+        # Clear mem
+        rm(input)
+        rm(chr_set)
+        gc()}
+    }
+
+  # Add up across all chromosomes 
+  geneset[[paste0(var,"_AC", AC, "_", setname, "_total")]] <- rowSums(geneset[,-1])
+  geneset <- select(geneset, c("Sample_ID", paste0(var,"_AC", AC, "_", setname, "_total")))
+  print(sum(geneset[[2]]))
+
+  # Save out 
+  output <- paste0(setname, '_', var, '_AC', AC, '_counts.csv')
+  write.csv(geneset, output)
+
+
+  upload_command <- paste('dx upload ', output, '--destination ./Variant_counts/Gene_sets/')
+  system(upload_command)
+}
+
+```
+
+## Brain expressed minus schema
+```{r}
+#sets$BE_NOT_SCHEMA_FDR5_gene<-F
+#sets$BE_NOT_SCHEMA_FDR5_gene[sets$Brain_expressed==T & is.na(sets$SCHEMA_FDR5_gene)] <- T
+#sets %>% count(BE_NOT_SCHEMA_FDR5_gene) 
+
+setname='BE_minus_SCHEMA_FDR_US'
+set=subset(sets, sets$BE_NOT_SCHEMA_FDR5_gene==T) 
+# Filter to only genes with a gene id (as this is what we'll match on)
+list=set$gene_id
+
+
+# Count
+for (var in variant_classes){
+  print(paste0('Running variant class ', var))
+  for (chr in chromosomes) {
+    # Process chr1 differently (as it's in 2 halves)
+    if (chr==1) {
+        # Read in 
+        first_half <- paste0('transposed_chr_1_first_half_', var, '_AC', AC,'_gene_counts.tsv')
+        first_half <- fread(first_half, header=TRUE, stringsAsFactors=FALSE)
+        second_half <- paste0('transposed_chr_1_second_half_', var, '_AC', AC,'_gene_counts.tsv')
+        second_half <- fread(second_half, header=TRUE, stringsAsFactors=FALSE)
+
+        # Merge to one table and add up the gene split across the two halves
+        chr1 <- merge(first_half, second_half, by = "Sample_ID")
+        chr1$ENSG00000198758 <- chr1$ENSG00000198758.x + chr1$ENSG00000198758.y
+        chr1 <- chr1 %>% select(-ENSG00000198758.x, -ENSG00000198758.y)
+        cat('n genes in chr 1:', length(chr1) - 1, '\n')
+        
+        # Filter to your gene set 
+        chr1 <- chr1 %>% select(c("Sample_ID", any_of(list)))
+        cat('n genes in chr 1 in set:', length(chr1) - 1, '\n')
+        # Only proceed if there are genes in the filtered set
+        if (ncol(chr1) > 1) {
+            chr1[[paste0("chr_1_", var, "_AC", AC, "_total")]] <- rowSums(chr1[,-1])
+            geneset <- select(chr1, c("Sample_ID", paste0("chr_1_", var, "_AC", AC, "_total")))
+        } else {
+            cat("No genes from the gene set found in chr 1.\n")
+        }
+        rm(chr1)
+        rm(first_half)
+        rm(second_half)
+        gc()
+    }
+    else {
+        # All other chromosomes
+        filename <- paste0('transposed_chr_', chr, '_', var, '_AC', AC,'_gene_counts.tsv')
+        input <- fread(filename, header=TRUE, stringsAsFactors=FALSE)
+        print(paste0('Processing chr ', chr))
+        cat('n genes in chr:', length(input) - 1, '\n')
+        # Filter the columns to keep only the genes present in the gene list
+        chr_set <- input %>% select(c("Sample_ID", any_of(list)))
+        cat('n genes in set in chr:' , length(chr_set) -1, '\n')
+        # Add up variants in genes in set 
+        if (ncol(chr_set) > 1) {
+            chr_set[[paste0("chr_", chr, "_", var, "_AC", AC, "_total")]] <- rowSums(chr_set[,-1])
+            chr_set <- select(chr_set, c("Sample_ID", paste0("chr_", chr, "_", var, "_AC", AC, "_total")))
+            
+            # Merge to big table and print length (to show increasing in size!!)
+            geneset <- merge(geneset, chr_set, by='Sample_ID', all=TRUE)  
+            # 'all=TRUE' to retain all rows in case one file is missing data
+            cat('n vars in set in chr:', sum(geneset[[paste0("chr_", chr, "_", var, "_AC", AC, "_total")]]), '\n')
+        } else {
+            cat("No genes from the gene set found in chr", chr, ".\n")
+        }
+        
+        # Clear mem
+        rm(input)
+        rm(chr_set)
+        gc()}
+    }
+
+  # Add up across all chromosomes 
+  geneset[[paste0(var,"_AC", AC, "_", setname, "_total")]] <- rowSums(geneset[,-1])
+  geneset <- select(geneset, c("Sample_ID", paste0(var,"_AC", AC, "_", setname, "_total")))
+  print(sum(geneset[[2]]))
+
+  # Save out 
+  output <- paste0(setname, '_', var, '_AC', AC, '_counts.csv')
+  write.csv(geneset, output)
+
+
+  upload_command <- paste('dx upload ', output, '--destination ./Variant_counts/Gene_sets/')
+  system(upload_command)
+}
+
+
+
+```
 
 # GWAS genes
 ## All genes in loci 
