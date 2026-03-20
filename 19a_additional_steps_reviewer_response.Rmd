@@ -1,0 +1,2479 @@
+---
+title: "review_response"
+output: html_document
+date: "2025-10-01"
+---
+# Load libraries
+```{r}
+library(dplyr)
+library(ggplot2)
+library(data.table)
+library(purrr)
+install.packages('broom')
+library(broom)
+library(purrr)
+library(tidyr)
+```
+# g in people with an NPD 
+## Read in
+```{r}
+### Read in
+system('dx download ./phenotype_cohorts/processed_cognition/processed_cog_tests_inc_g_Feb24.csv')
+phen=read.csv('processed_cog_tests_inc_g_Feb24.csv', header=T)
+## Ancestries
+system('dx download ./genetic_ancestries/app15175_ids/full_dataset_inferred_ancestries.csv')
+ancs_wrongid=read.csv('full_dataset_inferred_ancestries.csv', header=T)
+system('dx download ./genetic_ancestries/app15175_ids/PCAs_*')
+EUR_PCs_wrongid=read.table('PCAs_EUR_only.tsv', header=T)
+AAC_PCs_wrongid=read.table('PCAs_AAC_only.tsv', header=T)
+EAS_PCs_wrongid=read.table('PCAs_EAS_only.tsv', header=T)
+LAT_PCs_wrongid=read.table('PCAs_LAT_only.tsv', header=T)
+SAS_PCs_wrongid=read.table('PCAs_SAS_only.tsv', header=T)
+SSA_PCs_wrongid=read.table('PCAs_SSA_only.tsv', header=T)
+ADM_PCs_wrongid=read.table('PCAs_ADM_only.tsv', header=T)
+
+system('dx download ./phenotype_cohorts/link_AD.app15175_George.app14421_Xav.app17044_JW.app13310.txt')
+link_ids=read.table('link_AD.app15175_George.app14421_Xav.app17044_JW.app13310.txt', header=T)
+ancs=merge(ancs_wrongid, link_ids, by.x='FID', by.y='app15175')
+ancs=merge(ancs, EUR_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+ancs=merge(ancs, AAC_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+ancs=merge(ancs, EAS_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+ancs=merge(ancs, LAT_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+ancs=merge(ancs, SAS_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+ancs=merge(ancs, SSA_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+ancs=merge(ancs, ADM_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+
+# Merge 
+phen=merge(phen, ancs, by.x = 'eid', by.y='eid_13310')
+
+## QC
+system('dx download ./WES_QC/discordant_sex_ids.csv')
+ids_to_rm=read.csv('discordant_sex_ids.csv')
+ids_to_rm$remove=T
+phen=merge(phen, ids_to_rm, by.x = 'eid', by.y='x', all=T)
+phen=subset(phen, is.na(phen$remove)) 
+
+
+## Covariates
+system('dx download ./phenotype_cohorts/covars_participant.csv')
+covars=read.csv('covars_participant.csv', header=T)
+covars$seq_batch<-covars$p32050
+covars$AC_attended<-covars$p54_i0
+covars$sex_1male[covars$p31 == 'Male']<-1
+covars$sex_1male[covars$p31 == 'Female']<-2
+covars$standardised_age <- (covars$p21022 - mean(covars$p21022, na.rm = TRUE)) / sd(covars$p21022, na.rm = TRUE)
+covars$standardised_age_squared<-covars$standardised_age*covars$standardised_age
+covars$sex_standardised_age<-covars$sex_1male * covars$standardised_age
+covars$sex_standardised_age_squared<-covars$sex_1male * covars$standardised_age_squared
+phen=merge(phen, covars, by.x='eid', by.y='eid')
+
+
+## Diagnoses
+system('dx download ./phenotypes_cog_diagnoses_participation_death.csv')
+diagnoses=read.csv('phenotypes_cog_diagnoses_participation_death.csv', header=T)
+
+# Remove people with SZ, ID and/or ASD 
+diagnoses$NPD[diagnoses$SZ==F & diagnoses$ASD==F & diagnoses$intellectual_disability==F] <- F
+diagnoses$NPD[diagnoses$SZ==T | diagnoses$ASD==T | diagnoses$intellectual_disability==T] <- T
+diagnoses %>% count(NPD) #1,528
+
+diagnoses=diagnoses[,c(3,174)]
+
+phen=merge(phen, diagnoses, by='eid') 
+```
+
+## Plot 
+```{r}
+with_g = subset(phen, !is.na(phen$g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm)) #76,888
+with_g %>% count(NPD)
+g_SZ=subset(with_g, with_g$NPD==T)
+mean(g_SZ$g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm)
+sd(g_SZ$g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm)/sqrt(nrow(g_SZ))
+
+
+
+g_no_SZ=subset(with_g, with_g$NPD==F)
+mean(g_no_SZ$g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm)
+sd(g_no_SZ$g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm)/sqrt(nrow(g_no_SZ))
+
+# Plot mean and se
+summary_df <- with_g %>%
+  group_by(NPD) %>%
+  summarise(
+    mean_g = mean(g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm, na.rm = TRUE),
+    se_g = sd(g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm, na.rm = TRUE) / sqrt(n())
+  )
+
+
+
+ggplot(summary_df, aes(x = factor(NPD), y = mean_g, color = factor(NPD))) +
+  geom_point(size = 4) +
+  geom_errorbar(aes(ymin = mean_g - se_g, ymax = mean_g + se_g), width = 0.2) +
+  scale_y_continuous(limits = c(-0.36, 0.05)) +
+  labs(x = "Group",
+       y =  expression(paste("Mean ", italic("g")))) +
+  theme_minimal(base_size = 14)+
+  scale_x_discrete(labels = c("FALSE" = "No diagnosis of \n SZ, ASD or ID",
+                            "TRUE"  = "Diagnosis of SZ, \n ASD, and/or ID"))+
+  theme(legend.position = "none")
+
+
+
+```
+
+## Statistically compare
+```{r}
+# All ancestries
+model_all_anc <- glm(g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm ~ NPD + 
+                       AC_attended + sex_1male + standardised_age + 
+                       standardised_age_squared + sex_standardised_age + 
+                       sex_standardised_age_squared + AAC + EAS + LAT + SAS + 
+                       SSA + PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + 
+                       PC9 + PC10 + PC11 + PC12 + PC13 + PC14 + PC15 + PC16 + 
+                       PC17 + PC18 + PC19 + PC20 + PC21 + PC22 + PC23 + PC24 + 
+                       PC25 + PC26 + PC27 + PC28 + PC29 + PC30 + PC31 + PC32 + 
+                       PC33 + PC34,
+                     data = with_g)
+a= tidy(model_all_anc)
+
+
+```
+
+# Explaining variance in FI 
+```{r}
+with_g_with_FI_AC1=subset(with_g, !is.na(with_g$FI_AC1_n_correct_answers_Zscore))
+m1 <- lm(FI_AC1_n_correct_answers_Zscore ~ AC_attended + sex_1male + standardised_age + 
+                       standardised_age_squared + sex_standardised_age + 
+                       sex_standardised_age_squared, data = with_g)
+summary(m1)
+
+m2<- lm(FI_AC1_n_correct_answers_Zscore ~ 
+          g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm + AC_attended +
+          sex_1male + standardised_age + 
+          standardised_age_squared + sex_standardised_age + 
+          sex_standardised_age_squared, data = with_g)
+summary(m2)
+summary(m2)$adj.r.squared - summary(m1)$adj.r.squared
+
+m3<- lm(FI_AC1_n_correct_answers_Zscore ~ 
+          Numeric_memory_AC1_maximum_digits_remembered_Zscore + AC_attended +
+          sex_1male + standardised_age + 
+          standardised_age_squared + sex_standardised_age + 
+          sex_standardised_age_squared, data = with_g)
+summary(m3)
+summary(m3)$adj.r.squared - summary(m1)$adj.r.squared
+
+m4<- lm(FI_AC1_n_correct_answers_Zscore ~ 
+          Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm + AC_attended +
+          sex_1male + standardised_age + 
+          standardised_age_squared + sex_standardised_age + 
+          sex_standardised_age_squared, data = with_g)
+summary(m4)
+summary(m4)$adj.r.squared - summary(m1)$adj.r.squared
+
+
+m5<- lm(FI_AC1_n_correct_answers_Zscore ~ 
+          Reaction_time_AC1_mean_time_taken_Zscore_outliersrm + AC_attended +
+          sex_1male + standardised_age + 
+          standardised_age_squared + sex_standardised_age + 
+          sex_standardised_age_squared, data = with_g)
+summary(m5)
+summary(m5)$adj.r.squared - summary(m1)$adj.r.squared
+
+
+m6<- lm(FI_AC1_n_correct_answers_Zscore ~ 
+          TMTA_online1_time_to_complete_numeric_path_Zscore_outliersrm + AC_attended +
+          sex_1male + standardised_age + 
+          standardised_age_squared + sex_standardised_age + 
+          sex_standardised_age_squared, data = with_g)
+summary(m6)
+summary(m6)$adj.r.squared - summary(m1)$adj.r.squared
+
+m7<- lm(FI_AC1_n_correct_answers_Zscore ~ 
+          TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm + AC_attended +
+          sex_1male + standardised_age + 
+          standardised_age_squared + sex_standardised_age + 
+          sex_standardised_age_squared, data = with_g)
+summary(m7)
+summary(m7)$adj.r.squared - summary(m1)$adj.r.squared
+
+
+m8<- lm(FI_AC1_n_correct_answers_Zscore ~ 
+          SDS_online1_n_correct_cons_attempts_Zscore_outliersrm + AC_attended +
+          sex_1male + standardised_age + 
+          standardised_age_squared + sex_standardised_age + 
+          sex_standardised_age_squared, data = with_g)
+summary(m8)
+summary(m8)$adj.r.squared - summary(m1)$adj.r.squared
+
+m9<- lm(FI_AC1_n_correct_answers_Zscore ~ 
+          prospective_mem_AC1 + AC_attended +
+          sex_1male + standardised_age + 
+          standardised_age_squared + sex_standardised_age + 
+          sex_standardised_age_squared, data = with_g)
+summary(m9)
+summary(m9)$adj.r.squared - summary(m1)$adj.r.squared
+
+
+m_all<- lm(FI_AC1_n_correct_answers_Zscore ~ 
+          prospective_mem_AC1 + 
+          SDS_online1_n_correct_cons_attempts_Zscore_outliersrm +
+            TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm +
+            TMTA_online1_time_to_complete_numeric_path_Zscore_outliersrm +
+            Reaction_time_AC1_mean_time_taken_Zscore_outliersrm +
+            Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm +
+            Numeric_memory_AC1_maximum_digits_remembered_Zscore +
+            g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm + 
+          AC_attended +
+          sex_1male + standardised_age + 
+          standardised_age_squared + sex_standardised_age + 
+          sex_standardised_age_squared, data = with_g)
+summary(m_all)
+summary(m_all)$adj.r.squared - summary(m1)$adj.r.squared    
+
+with_g$TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm
+```
+
+
+# SMR expression separated gene sets
+Run script 14 and 16 for these sets and then plot. 
+## Read data for gene set counts
+```{r}
+# Set variables 
+AC='5orless' # run this same script with this set differently to edit AC! 
+chromosomes<-1:22
+variant_classes<-list('PTV', 'REVEL75_Miss', 'synonymous')
+
+# Download data
+# PTVs
+var<-'PTV'
+input_filename <- paste0('./Variant_counts/transposed_counts/AC', AC, '/AC', AC, '_', var,'/transposed*.tsv')
+download_command <- paste('dx download ', shQuote(input_filename))
+system(download_command)
+
+# Pathogenic missense
+var<-'REVEL75_Miss'
+input_filename <- paste0('./Variant_counts/transposed_counts/AC', AC, '/AC', AC, '_', var,'/transposed*.tsv')
+download_command <- paste('dx download ', shQuote(input_filename))
+system(download_command)
+
+# Synonymous variants
+var<-'synonymous'
+input_filename <- paste0('./Variant_counts/transposed_counts/AC', AC, '/AC', AC, '_', var,'/transposed*.tsv')
+download_command <- paste('dx download ', shQuote(input_filename))
+system(download_command)
+
+
+# Gene set annotations
+system('dx download Variant_counts/Gene_sets/GWAS_sets_for_RAP_RR_Nov25.csv')
+sets=read.csv('GWAS_sets_for_RAP_RR_Nov25.csv', header=T)
+```
+
+## Count across SMR sets
+### Positive
+```{r}
+setname='SMR_prioritised_positive_expression'
+set=subset(sets, sets$positive_expression==T) # 24 genes
+list=set$gene_id
+
+for (var in variant_classes){
+  print(paste0('Running variant class ', var))
+  for (chr in chromosomes) {
+    # Process chr1 differently (as it's in 2 halves)
+    if (chr==1) {
+        # Read in 
+        first_half <- paste0('transposed_chr_1_first_half_', var, '_AC', AC,'_gene_counts.tsv')
+        first_half <- fread(first_half, header=TRUE, stringsAsFactors=FALSE)
+        second_half <- paste0('transposed_chr_1_second_half_', var, '_AC', AC,'_gene_counts.tsv')
+        second_half <- fread(second_half, header=TRUE, stringsAsFactors=FALSE)
+
+        # Merge to one table and add up the gene split across the two halves
+        chr1 <- merge(first_half, second_half, by = "Sample_ID")
+        chr1$ENSG00000198758 <- chr1$ENSG00000198758.x + chr1$ENSG00000198758.y
+        chr1 <- chr1 %>% select(-ENSG00000198758.x, -ENSG00000198758.y)
+        cat('n genes in chr 1:', length(chr1) - 1, '\n')
+        
+        # Filter to your gene set 
+        chr1 <- chr1 %>% select(c("Sample_ID", any_of(list)))
+        cat('n genes in chr 1 in set:', length(chr1) - 1, '\n')
+        # Only proceed if there are genes in the filtered set
+        if (ncol(chr1) > 1) {
+            chr1[[paste0("chr_1_", var, "_AC", AC, "_total")]] <- rowSums(chr1[,-1])
+            geneset <- select(chr1, c("Sample_ID", paste0("chr_1_", var, "_AC", AC, "_total")))
+        } else {
+            cat("No genes from the gene set found in chr 1.\n")
+        }
+        rm(chr1)
+        rm(first_half)
+        rm(second_half)
+        gc()
+    }
+    else {
+        # All other chromosomes
+        filename <- paste0('transposed_chr_', chr, '_', var, '_AC', AC,'_gene_counts.tsv')
+        input <- fread(filename, header=TRUE, stringsAsFactors=FALSE)
+        print(paste0('Processing chr ', chr))
+        cat('n genes in chr:', length(input) - 1, '\n')
+        # Filter the columns to keep only the genes present in the gene list
+        chr_set <- input %>% select(c("Sample_ID", any_of(list)))
+        cat('n genes in set in chr:' , length(chr_set) -1, '\n')
+        # Add up variants in genes in set 
+        if (ncol(chr_set) > 1) {
+            chr_set[[paste0("chr_", chr, "_", var, "_AC", AC, "_total")]] <- rowSums(chr_set[,-1])
+            chr_set <- select(chr_set, c("Sample_ID", paste0("chr_", chr, "_", var, "_AC", AC, "_total")))
+            
+            # Merge to big table and print length (to show increasing in size!!)
+            geneset <- merge(geneset, chr_set, by='Sample_ID', all=TRUE)  
+            # 'all=TRUE' to retain all rows in case one file is missing data
+            cat('n vars in set in chr:', sum(geneset[[paste0("chr_", chr, "_", var, "_AC", AC, "_total")]]), '\n')
+        } else {
+            cat("No genes from the gene set found in chr", chr, ".\n")
+        }
+        
+        # Clear mem
+        rm(input)
+        rm(chr_set)
+        gc()}
+    }
+
+  # Add up across all chromosomes 
+  geneset[[paste0(var,"_AC", AC, "_", setname, "_total")]] <- rowSums(geneset[,-1])
+  geneset <- select(geneset, c("Sample_ID", paste0(var,"_AC", AC, "_", setname, "_total")))
+  print(sum(geneset[[2]]))
+
+  # Save out 
+  output <- paste0(setname, '_', var, '_AC', AC, '_counts.csv')
+  write.csv(geneset, output)
+
+
+  upload_command <- paste('dx upload ', output, '--destination ./Variant_counts/Gene_sets/')
+  system(upload_command)
+}
+
+```
+
+### Negative
+```{r}
+setname='SMR_prioritised_negative_expression'
+set=subset(sets, sets$negative_expression==T) #20 genes
+list=set$gene_id
+
+for (var in variant_classes){
+  print(paste0('Running variant class ', var))
+  for (chr in chromosomes) {
+    # Process chr1 differently (as it's in 2 halves)
+    if (chr==1) {
+        # Read in 
+        first_half <- paste0('transposed_chr_1_first_half_', var, '_AC', AC,'_gene_counts.tsv')
+        first_half <- fread(first_half, header=TRUE, stringsAsFactors=FALSE)
+        second_half <- paste0('transposed_chr_1_second_half_', var, '_AC', AC,'_gene_counts.tsv')
+        second_half <- fread(second_half, header=TRUE, stringsAsFactors=FALSE)
+
+        # Merge to one table and add up the gene split across the two halves
+        chr1 <- merge(first_half, second_half, by = "Sample_ID")
+        chr1$ENSG00000198758 <- chr1$ENSG00000198758.x + chr1$ENSG00000198758.y
+        chr1 <- chr1 %>% select(-ENSG00000198758.x, -ENSG00000198758.y)
+        cat('n genes in chr 1:', length(chr1) - 1, '\n')
+        
+        # Filter to your gene set 
+        chr1 <- chr1 %>% select(c("Sample_ID", any_of(list)))
+        cat('n genes in chr 1 in set:', length(chr1) - 1, '\n')
+        # Only proceed if there are genes in the filtered set
+        if (ncol(chr1) > 1) {
+            chr1[[paste0("chr_1_", var, "_AC", AC, "_total")]] <- rowSums(chr1[,-1])
+            geneset <- select(chr1, c("Sample_ID", paste0("chr_1_", var, "_AC", AC, "_total")))
+        } else {
+            cat("No genes from the gene set found in chr 1.\n")
+        }
+        rm(chr1)
+        rm(first_half)
+        rm(second_half)
+        gc()
+    }
+    else {
+        # All other chromosomes
+        filename <- paste0('transposed_chr_', chr, '_', var, '_AC', AC,'_gene_counts.tsv')
+        input <- fread(filename, header=TRUE, stringsAsFactors=FALSE)
+        print(paste0('Processing chr ', chr))
+        cat('n genes in chr:', length(input) - 1, '\n')
+        # Filter the columns to keep only the genes present in the gene list
+        chr_set <- input %>% select(c("Sample_ID", any_of(list)))
+        cat('n genes in set in chr:' , length(chr_set) -1, '\n')
+        # Add up variants in genes in set 
+        if (ncol(chr_set) > 1) {
+            chr_set[[paste0("chr_", chr, "_", var, "_AC", AC, "_total")]] <- rowSums(chr_set[,-1])
+            chr_set <- select(chr_set, c("Sample_ID", paste0("chr_", chr, "_", var, "_AC", AC, "_total")))
+            
+            # Merge to big table and print length (to show increasing in size!!)
+            geneset <- merge(geneset, chr_set, by='Sample_ID', all=TRUE)  
+            # 'all=TRUE' to retain all rows in case one file is missing data
+            cat('n vars in set in chr:', sum(geneset[[paste0("chr_", chr, "_", var, "_AC", AC, "_total")]]), '\n')
+        } else {
+            cat("No genes from the gene set found in chr", chr, ".\n")
+        }
+        
+        # Clear mem
+        rm(input)
+        rm(chr_set)
+        gc()}
+    }
+
+  # Add up across all chromosomes 
+  geneset[[paste0(var,"_AC", AC, "_", setname, "_total")]] <- rowSums(geneset[,-1])
+  geneset <- select(geneset, c("Sample_ID", paste0(var,"_AC", AC, "_", setname, "_total")))
+  print(sum(geneset[[2]]))
+
+  # Save out 
+  output <- paste0(setname, '_', var, '_AC', AC, '_counts.csv')
+  write.csv(geneset, output)
+
+
+  upload_command <- paste('dx upload ', output, '--destination ./Variant_counts/Gene_sets/')
+  system(upload_command)
+}
+
+```
+
+## Regress
+### Read in
+```{r}
+system('dx download ./phenotype_cohorts/processed_cognition/processed_cog_tests_inc_g_Feb24.csv')
+phen=read.csv('processed_cog_tests_inc_g_Feb24.csv', header=T)
+## Ancestries
+system('dx download ./genetic_ancestries/app15175_ids/full_dataset_inferred_ancestries.csv')
+ancs_wrongid=read.csv('full_dataset_inferred_ancestries.csv', header=T)
+system('dx download ./genetic_ancestries/app15175_ids/PCAs_*')
+EUR_PCs_wrongid=read.table('PCAs_EUR_only.tsv', header=T)
+AAC_PCs_wrongid=read.table('PCAs_AAC_only.tsv', header=T)
+EAS_PCs_wrongid=read.table('PCAs_EAS_only.tsv', header=T)
+LAT_PCs_wrongid=read.table('PCAs_LAT_only.tsv', header=T)
+SAS_PCs_wrongid=read.table('PCAs_SAS_only.tsv', header=T)
+SSA_PCs_wrongid=read.table('PCAs_SSA_only.tsv', header=T)
+ADM_PCs_wrongid=read.table('PCAs_ADM_only.tsv', header=T)
+
+system('dx download ./phenotype_cohorts/link_AD.app15175_George.app14421_Xav.app17044_JW.app13310.txt')
+link_ids=read.table('link_AD.app15175_George.app14421_Xav.app17044_JW.app13310.txt', header=T)
+ancs=merge(ancs_wrongid, link_ids, by.x='FID', by.y='app15175')
+ancs=merge(ancs, EUR_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+ancs=merge(ancs, AAC_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+ancs=merge(ancs, EAS_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+ancs=merge(ancs, LAT_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+ancs=merge(ancs, SAS_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+ancs=merge(ancs, SSA_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+ancs=merge(ancs, ADM_PCs_wrongid, by.x ='FID', by.y='s', all=T)
+
+# Merge 
+phen=merge(phen, ancs, by.x = 'eid', by.y='eid_13310')
+
+## QC
+system('dx download ./WES_QC/discordant_sex_ids.csv')
+ids_to_rm=read.csv('discordant_sex_ids.csv')
+ids_to_rm$remove=T
+phen=merge(phen, ids_to_rm, by.x = 'eid', by.y='x', all=T)
+phen=subset(phen, is.na(phen$remove)) 
+
+
+## Covariates
+system('dx download ./phenotype_cohorts/covars_participant.csv')
+covars=read.csv('covars_participant.csv', header=T)
+covars$seq_batch<-covars$p32050
+covars$AC_attended<-covars$p54_i0
+covars$sex_1male[covars$p31 == 'Male']<-1
+covars$sex_1male[covars$p31 == 'Female']<-2
+covars$standardised_age <- (covars$p21022 - mean(covars$p21022, na.rm = TRUE)) / sd(covars$p21022, na.rm = TRUE)
+covars$standardised_age_squared<-covars$standardised_age*covars$standardised_age
+covars$sex_standardised_age<-covars$sex_1male * covars$standardised_age
+covars$sex_standardised_age_squared<-covars$sex_1male * covars$standardised_age_squared
+phen=merge(phen, covars, by.x='eid', by.y='eid')
+
+## Diagnoses 
+system('dx download ./phenotypes_cog_diagnoses_participation_death.csv')
+diagnoses=read.csv('phenotypes_cog_diagnoses_participation_death.csv', header=T)
+# Remove people with SZ, ID and/or ASD 
+diagnoses=subset(diagnoses, diagnoses$SZ==F & diagnoses$ASD==F & diagnoses$intellectual_disability==F) 
+diagnoses$no_diagnoses<-T
+diagnoses=diagnoses[,c(3,174)]
+phen=merge(phen, diagnoses, by='eid') 
+```
+
+### Get counts
+```{r}
+system('dx download ./Variant_counts/Gene_sets/exome_*_AC5orless_*.csv --overwrite')
+
+# REMOVE SINGLE GENE TABLES HERE!!
+file_list <- list.files(path = "./", pattern = "*_AC5orless_counts.csv", full.names = TRUE)
+
+# Read, drop first column (V1), and merge each file
+counts <- lapply(file_list, function(file) {
+  data <- fread(file)  # Read the file
+  data[, V1 := NULL]  # Drop the first column (V1)
+  return(data)
+}) %>%
+reduce(function(x, y) merge(x, y, by = "Sample_ID", all = TRUE))  # Merge the data frames
+
+
+all_ancs=merge(phen, counts, by.x='eid', by.y='Sample_ID') 
+EU_ancs=subset(all_ancs, all_ancs$EUR>0.8) 
+
+### Set covars 
+covars_Eu_anc_NS <- 'seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + sex_standardised_age + sex_standardised_age_squared + synonymous_AC5orless_exome_wide_total + AAC + EAS + LAT + SAS + EU_PC1 + EU_PC2 + EU_PC3 + EU_PC4 + EU_PC5 + EU_PC6 + EU_PC7 + EU_PC8 + EU_PC9 + EU_PC10' # SSA removed here as no one defined as EUR anc has a non-zero SSA probability. 
+
+covars_Eu_anc_syn <- 'seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + sex_standardised_age + sex_standardised_age_squared + AAC + EAS + LAT + SAS + EU_PC1 + EU_PC2 + EU_PC3 + EU_PC4 + EU_PC5 + EU_PC6 + EU_PC7 + EU_PC8 + EU_PC9 + EU_PC10'
+
+### Prep results table 
+results <- data.frame(
+  gene_set=character(),
+  dep_var = character(),
+  indep_var = character(),
+  allele_count = numeric(),
+  beta = numeric(),
+  SE = numeric(),
+  lower_CI = numeric(),
+  upper_CI = numeric(),
+  p_value = numeric(),
+  n_vars = integer(),
+  n_people = integer(),
+  ancestry=character(),
+  stringsAsFactors = FALSE
+)
+
+sets <- list('SMR_prioritised_negative_expression',
+             'SMR_prioritised_positive_expression')
+
+var_types<-list('PTV', 'REVEL75_Miss')
+dependent_var<-list('g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm')
+```
+
+### Regress!
+```{r}
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_NS))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+
+var_types<-list('synonymous')
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_syn))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+```
+
+### Save out
+```{r}
+write.csv(results, 'results_g_regressions_SMR_expressions_FINAL.csv')
+system('dx upload results_g_regressions_SMR_expressions_FINAL.csv --destination ./Variant_counts/Gene_sets/reviewer_response/')
+```
+
+Download and plot in R!!
+
+
+# Describe european ancestry probability distribution
+```{r}
+EU_ancs %>% count(EUR)
+
+EUR1 = subset(EU_ancs, EU_ancs$EUR==1)
+EUR1 = subset(EU_ancs, EU_ancs$EUR>0.99)
+EUR1 = subset(EU_ancs, EU_ancs$EUR>0.95)
+EUR1 = subset(EU_ancs, EU_ancs$EUR>0.90)
+```
+
+# Show that not controlling for ancestry probabilities makes no difference
+## Get counts
+```{r}
+system('dx download ./Variant_counts/Gene_sets/pLI*_AC5orless_*.csv --overwrite')
+
+# REMOVE SINGLE GENE TABLES HERE!!
+file_list <- list.files(path = "./", pattern = "*_AC5orless_counts.csv", full.names = TRUE)
+
+# Read, drop first column (V1), and merge each file
+counts <- lapply(file_list, function(file) {
+  data <- fread(file)  # Read the file
+  data[, V1 := NULL]  # Drop the first column (V1)
+  return(data)
+}) %>%
+reduce(function(x, y) merge(x, y, by = "Sample_ID", all = TRUE))  # Merge the data frames
+
+
+all_ancs=merge(phen, counts, by.x='eid', by.y='Sample_ID') 
+EU_ancs=subset(all_ancs, all_ancs$EUR>0.8) 
+
+### Set covars (dropping ancestry probabilities)
+covars_Eu_anc_NS <- 'seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + sex_standardised_age + sex_standardised_age_squared + synonymous_AC5orless_exome_wide_total + EU_PC1 + EU_PC2 + EU_PC3 + EU_PC4 + EU_PC5 + EU_PC6 + EU_PC7 + EU_PC8 + EU_PC9 + EU_PC10' # SSA removed here as no one defined as EUR anc has a non-zero SSA probability. 
+
+covars_Eu_anc_syn <- 'seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + sex_standardised_age + sex_standardised_age_squared + EU_PC1 + EU_PC2 + EU_PC3 + EU_PC4 + EU_PC5 + EU_PC6 + EU_PC7 + EU_PC8 + EU_PC9 + EU_PC10'
+
+### Prep results table 
+results <- data.frame(
+  gene_set=character(),
+  dep_var = character(),
+  indep_var = character(),
+  allele_count = numeric(),
+  beta = numeric(),
+  SE = numeric(),
+  lower_CI = numeric(),
+  upper_CI = numeric(),
+  p_value = numeric(),
+  n_vars = integer(),
+  n_people = integer(),
+  ancestry=character(),
+  stringsAsFactors = FALSE
+)
+
+sets <- list('exome_wide',
+              'pLI_0.9')
+
+dependent_var<-list('g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm')
+```
+
+### Regress!
+```{r}
+var_types<-list('PTV', 'REVEL75_Miss')
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_NS))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only_no_probabilities'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+
+var_types<-list('synonymous')
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_syn))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only_no_probabilities'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+```
+
+### Save out
+```{r}
+write.csv(results, 'results_g_regressions_no_probability_covars.csv')
+system('dx upload results_g_regressions_no_probability_covars.csv --destination ./Variant_counts/Gene_sets/reviewer_response/')
+```
+
+
+
+# Show that running in people with an EUR-like probability of 1 makes no difference
+## Get counts
+```{r}
+system('dx download ./Variant_counts/Gene_sets/pLI*_AC5orless_*.csv --overwrite')
+
+# REMOVE SINGLE GENE TABLES HERE!!
+file_list <- list.files(path = "./", pattern = "*_AC5orless_counts.csv", full.names = TRUE)
+
+# Read, drop first column (V1), and merge each file
+counts <- lapply(file_list, function(file) {
+  data <- fread(file)  # Read the file
+  data[, V1 := NULL]  # Drop the first column (V1)
+  return(data)
+}) %>%
+reduce(function(x, y) merge(x, y, by = "Sample_ID", all = TRUE))  # Merge the data frames
+
+
+all_ancs=merge(phen, counts, by.x='eid', by.y='Sample_ID') 
+EU_ancs=subset(all_ancs, all_ancs$EUR==1.00) 
+
+### Set covars (dropping ancestry probabilities)
+covars_Eu_anc_NS <- 'seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + sex_standardised_age + sex_standardised_age_squared + synonymous_AC5orless_exome_wide_total + EU_PC1 + EU_PC2 + EU_PC3 + EU_PC4 + EU_PC5 + EU_PC6 + EU_PC7 + EU_PC8 + EU_PC9 + EU_PC10' # SSA removed here as no one defined as EUR anc has a non-zero SSA probability. 
+
+covars_Eu_anc_syn <- 'seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + sex_standardised_age + sex_standardised_age_squared + EU_PC1 + EU_PC2 + EU_PC3 + EU_PC4 + EU_PC5 + EU_PC6 + EU_PC7 + EU_PC8 + EU_PC9 + EU_PC10'
+
+### Prep results table 
+results <- data.frame(
+  gene_set=character(),
+  dep_var = character(),
+  indep_var = character(),
+  allele_count = numeric(),
+  beta = numeric(),
+  SE = numeric(),
+  lower_CI = numeric(),
+  upper_CI = numeric(),
+  p_value = numeric(),
+  n_vars = integer(),
+  n_people = integer(),
+  ancestry=character(),
+  stringsAsFactors = FALSE
+)
+
+sets <- list('exome_wide',
+              'pLI_0.9')
+
+dependent_var<-list('g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm')
+```
+
+### Regress!
+```{r}
+var_types<-list('PTV', 'REVEL75_Miss')
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_NS))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_strict_only'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+
+var_types<-list('synonymous')
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_syn))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_strict_only'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+```
+
+### Save out
+```{r}
+write.csv(results, 'results_g_regressions_strict_EUR.csv')
+system('dx upload results_g_regressions_strict_EUR.csv --destination ./Variant_counts/Gene_sets/reviewer_response/')
+```
+
+
+And then plot!! 
+
+
+
+# Recounts
+## Transposing counts
+### AC21 to 50 
+run chr 2-16
+```{r}
+library(data.table)
+
+# Make a list of chromosomes, variant classes, and ACs to process (ensure names match up to table names)
+chromosomes <- 1:22
+variant_classes <- c("REVEL75_Miss", "PTV", "synonymous")
+allele_counts <- '21to50'   
+
+# Loop over each chromosome
+for (chr in chromosomes) {
+    for (var in variant_classes) {
+        for (AC in allele_counts) {
+          if (chr == 1) {
+            halves <- c("first_half", "second_half")
+            for (half in halves) {
+                    # Construct the file name for the current half
+                    input_filename <- paste0('Variant_counts/untransposed_counts/chr_', chr, '_', half, '_', var, '_AC', AC, '_gene_counts.tsv')
+                    
+                    # Download the file to your project using dx download
+                    download_command <- paste('dx download ', shQuote(input_filename))
+                    system(download_command)
+
+                    # Read the table for the current half using fread
+                    input_filename <- paste0('chr_', chr, '_', half, '_', var, '_AC', AC, '_gene_counts.tsv')
+                    counts <- fread(input_filename, header=TRUE, stringsAsFactors=FALSE)
+                     # Remove the gene_id that is NA - if there are any variants not assigned to a gene then Hail writes them to here in the counting process. 
+                    counts=subset(counts, !is.na(counts$gene_id)) 
+                    
+                    # Transpose the table using melt and dcast
+                    transposed_counts <- melt(counts, id.vars = "gene_id", variable.name = "Sample_ID", value.name = "Burden")
+                    transposed_counts <- dcast(transposed_counts, Sample_ID ~ gene_id, value.var = "Burden")
+
+                    # Write the transposed table out
+                    output_filename <- paste0('transposed_chr_', chr, '_', half, '_', var, '_AC', AC, '_gene_counts.tsv')
+                    fwrite(transposed_counts, output_filename, sep = "\t")
+
+                    # Upload the file to your project using dx upload
+                    upload_command <- paste('dx upload', shQuote(output_filename), '--destination Variant_counts/transposed_counts/' )
+                    system(upload_command)
+                }
+            }
+          else {
+            # Construct the file name 
+            input_filename <- paste0('Variant_counts/untransposed_counts/chr_', chr, '_', var, '_AC', AC, '_gene_counts.tsv')
+
+            # Download the file to your project using dx download
+            download_command <- paste('dx download ', shQuote(input_filename))
+            system(download_command)
+            
+            # Read the table for the current chromosome using fread and transpos
+            ## Using fread from data table really speeds up the process of reading in 
+            input_filename <- paste0('chr_', chr, '_', var, '_AC', AC, '_gene_counts.tsv')
+            counts <- fread(input_filename, header=TRUE, stringsAsFactors=FALSE)
+            # Remove the gene_id that is NA - if there are any variants not assigned to a gene then Hail writes them to here in the counting process. 
+            counts=subset(counts, !is.na(counts$gene_id)) 
+            
+            # Transpose the table using melt and dcast:
+            ## Melt takes table from wide format into a v long format, where each row represents a single observation (so a single gene and a single sample)
+            ### This transposed table is really big so you need a fairly high mem session for this.
+            transposed_counts <- melt(counts, id.vars = "gene_id", variable.name = "Sample_ID", value.name = "Burden")
+            ## dcast then takes the dataset in this long format and casts it back to a wide format, but this time with sample id as rows and genes as columns
+            transposed_counts <- dcast(transposed_counts, Sample_ID ~ gene_id, value.var = "Burden")
+            
+            # Write the transposed table out 
+            output_filename <- paste0('transposed_chr_', chr, '_', var, '_AC', AC, '_gene_counts.tsv')
+            fwrite(transposed_counts, output_filename, sep = "\t")
+
+            # Upload the file to your project using dx upload
+            upload_command <- paste('dx upload', shQuote(output_filename),'--destination Variant_counts/transposed_counts/')
+            system(upload_command)
+          } 
+        }
+    }
+}
+          
+```
+
+### AC11 to 20 
+```{r}
+library(data.table)
+
+# Make a list of chromosomes, variant classes, and ACs to process (ensure names match up to table names)
+chromosomes <- 1:22
+variant_classes <- c("REVEL75_Miss", "PTV", "synonymous")
+allele_counts <- '11to20'   
+
+# Loop over each chromosome
+for (chr in chromosomes) {
+    for (var in variant_classes) {
+        for (AC in allele_counts) {
+          if (chr == 1) {
+            halves <- c("first_half", "second_half")
+            for (half in halves) {
+                    # Construct the file name for the current half
+                    input_filename <- paste0('Variant_counts/untransposed_counts/chr_', chr, '_', half, '_', var, '_AC', AC, '_gene_counts.tsv')
+                    
+                    # Download the file to your project using dx download
+                    download_command <- paste('dx download ', shQuote(input_filename))
+                    system(download_command)
+
+                    # Read the table for the current half using fread
+                    input_filename <- paste0('chr_', chr, '_', half, '_', var, '_AC', AC, '_gene_counts.tsv')
+                    counts <- fread(input_filename, header=TRUE, stringsAsFactors=FALSE)
+                     # Remove the gene_id that is NA - if there are any variants not assigned to a gene then Hail writes them to here in the counting process. 
+                    counts=subset(counts, !is.na(counts$gene_id)) 
+                    
+                    # Transpose the table using melt and dcast
+                    transposed_counts <- melt(counts, id.vars = "gene_id", variable.name = "Sample_ID", value.name = "Burden")
+                    transposed_counts <- dcast(transposed_counts, Sample_ID ~ gene_id, value.var = "Burden")
+
+                    # Write the transposed table out
+                    output_filename <- paste0('transposed_chr_', chr, '_', half, '_', var, '_AC', AC, '_gene_counts.tsv')
+                    fwrite(transposed_counts, output_filename, sep = "\t")
+
+                    # Upload the file to your project using dx upload
+                    upload_command <- paste('dx upload', shQuote(output_filename), '--destination Variant_counts/transposed_counts/' )
+                    system(upload_command)
+                }
+            }
+          else {
+            # Construct the file name 
+            input_filename <- paste0('Variant_counts/untransposed_counts/chr_', chr, '_', var, '_AC', AC, '_gene_counts.tsv')
+
+            # Download the file to your project using dx download
+            download_command <- paste('dx download ', shQuote(input_filename))
+            system(download_command)
+            
+            # Read the table for the current chromosome using fread and transpos
+            ## Using fread from data table really speeds up the process of reading in 
+            input_filename <- paste0('chr_', chr, '_', var, '_AC', AC, '_gene_counts.tsv')
+            counts <- fread(input_filename, header=TRUE, stringsAsFactors=FALSE)
+            # Remove the gene_id that is NA - if there are any variants not assigned to a gene then Hail writes them to here in the counting process. 
+            counts=subset(counts, !is.na(counts$gene_id)) 
+            
+            # Transpose the table using melt and dcast:
+            ## Melt takes table from wide format into a v long format, where each row represents a single observation (so a single gene and a single sample)
+            ### This transposed table is really big so you need a fairly high mem session for this.
+            transposed_counts <- melt(counts, id.vars = "gene_id", variable.name = "Sample_ID", value.name = "Burden")
+            ## dcast then takes the dataset in this long format and casts it back to a wide format, but this time with sample id as rows and genes as columns
+            transposed_counts <- dcast(transposed_counts, Sample_ID ~ gene_id, value.var = "Burden")
+            
+            # Write the transposed table out 
+            output_filename <- paste0('transposed_chr_', chr, '_', var, '_AC', AC, '_gene_counts.tsv')
+            fwrite(transposed_counts, output_filename, sep = "\t")
+
+            # Upload the file to your project using dx upload
+            upload_command <- paste('dx upload', shQuote(output_filename),'--destination Variant_counts/transposed_counts/')
+            system(upload_command)
+          } 
+        }
+    }
+}
+          
+```
+
+### AC6 to 10 
+```{r}
+library(data.table)
+
+# Make a list of chromosomes, variant classes, and ACs to process (ensure names match up to table names)
+chromosomes <- 1:22
+variant_classes <- c("REVEL75_Miss", "PTV", "synonymous")
+allele_counts <- '6to10'   
+
+# Loop over each chromosome
+for (chr in chromosomes) {
+    for (var in variant_classes) {
+        for (AC in allele_counts) {
+          if (chr == 1) {
+            halves <- c("first_half", "second_half")
+            for (half in halves) {
+                    # Construct the file name for the current half
+                    input_filename <- paste0('Variant_counts/untransposed_counts/chr_', chr, '_', half, '_', var, '_AC', AC, '_gene_counts.tsv')
+                    
+                    # Download the file to your project using dx download
+                    download_command <- paste('dx download ', shQuote(input_filename))
+                    system(download_command)
+
+                    # Read the table for the current half using fread
+                    input_filename <- paste0('chr_', chr, '_', half, '_', var, '_AC', AC, '_gene_counts.tsv')
+                    counts <- fread(input_filename, header=TRUE, stringsAsFactors=FALSE)
+                     # Remove the gene_id that is NA - if there are any variants not assigned to a gene then Hail writes them to here in the counting process. 
+                    counts=subset(counts, !is.na(counts$gene_id)) 
+                    
+                    # Transpose the table using melt and dcast
+                    transposed_counts <- melt(counts, id.vars = "gene_id", variable.name = "Sample_ID", value.name = "Burden")
+                    transposed_counts <- dcast(transposed_counts, Sample_ID ~ gene_id, value.var = "Burden")
+
+                    # Write the transposed table out
+                    output_filename <- paste0('transposed_chr_', chr, '_', half, '_', var, '_AC', AC, '_gene_counts.tsv')
+                    fwrite(transposed_counts, output_filename, sep = "\t")
+
+                    # Upload the file to your project using dx upload
+                    upload_command <- paste('dx upload', shQuote(output_filename), '--destination Variant_counts/transposed_counts/' )
+                    system(upload_command)
+                }
+            }
+          else {
+            # Construct the file name 
+            input_filename <- paste0('Variant_counts/untransposed_counts/chr_', chr, '_', var, '_AC', AC, '_gene_counts.tsv')
+
+            # Download the file to your project using dx download
+            download_command <- paste('dx download ', shQuote(input_filename))
+            system(download_command)
+            
+            # Read the table for the current chromosome using fread and transpos
+            ## Using fread from data table really speeds up the process of reading in 
+            input_filename <- paste0('chr_', chr, '_', var, '_AC', AC, '_gene_counts.tsv')
+            counts <- fread(input_filename, header=TRUE, stringsAsFactors=FALSE)
+            # Remove the gene_id that is NA - if there are any variants not assigned to a gene then Hail writes them to here in the counting process. 
+            counts=subset(counts, !is.na(counts$gene_id)) 
+            
+            # Transpose the table using melt and dcast:
+            ## Melt takes table from wide format into a v long format, where each row represents a single observation (so a single gene and a single sample)
+            ### This transposed table is really big so you need a fairly high mem session for this.
+            transposed_counts <- melt(counts, id.vars = "gene_id", variable.name = "Sample_ID", value.name = "Burden")
+            ## dcast then takes the dataset in this long format and casts it back to a wide format, but this time with sample id as rows and genes as columns
+            transposed_counts <- dcast(transposed_counts, Sample_ID ~ gene_id, value.var = "Burden")
+            
+            # Write the transposed table out 
+            output_filename <- paste0('transposed_chr_', chr, '_', var, '_AC', AC, '_gene_counts.tsv')
+            fwrite(transposed_counts, output_filename, sep = "\t")
+
+            # Upload the file to your project using dx upload
+            upload_command <- paste('dx upload', shQuote(output_filename),'--destination Variant_counts/transposed_counts/')
+            system(upload_command)
+          } 
+        }
+    }
+}
+          
+```
+
+### Less deleterious missense (AC 5 or less)
+```{r}
+library(data.table)
+
+# Make a list of chromosomes, variant classes, and ACs to process (ensure names match up to table names)
+chromosomes <- 1:22
+variant_classes <- c("benign_REVEL50_Miss", "mid_REVEL50to75_Miss")
+allele_counts <- '5orless'   
+
+# Loop over each chromosome
+for (chr in chromosomes) {
+    for (var in variant_classes) {
+        for (AC in allele_counts) {
+          if (chr == 1) {
+            halves <- c("first_half", "second_half")
+            for (half in halves) {
+                    # Construct the file name for the current half
+                    input_filename <- paste0('Variant_counts/untransposed_counts/chr_', chr, '_', half, '_', var, '_AC', AC, '_gene_counts.tsv')
+                    
+                    # Download the file to your project using dx download
+                    download_command <- paste('dx download ', shQuote(input_filename))
+                    system(download_command)
+
+                    # Read the table for the current half using fread
+                    input_filename <- paste0('chr_', chr, '_', half, '_', var, '_AC', AC, '_gene_counts.tsv')
+                    counts <- fread(input_filename, header=TRUE, stringsAsFactors=FALSE)
+                     # Remove the gene_id that is NA - if there are any variants not assigned to a gene then Hail writes them to here in the counting process. 
+                    counts=subset(counts, !is.na(counts$gene_id)) 
+                    
+                    # Transpose the table using melt and dcast
+                    transposed_counts <- melt(counts, id.vars = "gene_id", variable.name = "Sample_ID", value.name = "Burden")
+                    transposed_counts <- dcast(transposed_counts, Sample_ID ~ gene_id, value.var = "Burden")
+
+                    # Write the transposed table out
+                    output_filename <- paste0('transposed_chr_', chr, '_', half, '_', var, '_AC', AC, '_gene_counts.tsv')
+                    fwrite(transposed_counts, output_filename, sep = "\t")
+
+                    # Upload the file to your project using dx upload
+                    upload_command <- paste('dx upload', shQuote(output_filename), '--destination Variant_counts/transposed_counts/' )
+                    system(upload_command)
+                }
+            }
+          else {
+            # Construct the file name 
+            input_filename <- paste0('Variant_counts/untransposed_counts/chr_', chr, '_', var, '_AC', AC, '_gene_counts.tsv')
+
+            # Download the file to your project using dx download
+            download_command <- paste('dx download ', shQuote(input_filename))
+            system(download_command)
+            
+            # Read the table for the current chromosome using fread and transpos
+            ## Using fread from data table really speeds up the process of reading in 
+            input_filename <- paste0('chr_', chr, '_', var, '_AC', AC, '_gene_counts.tsv')
+            counts <- fread(input_filename, header=TRUE, stringsAsFactors=FALSE)
+            # Remove the gene_id that is NA - if there are any variants not assigned to a gene then Hail writes them to here in the counting process. 
+            counts=subset(counts, !is.na(counts$gene_id)) 
+            
+            # Transpose the table using melt and dcast:
+            ## Melt takes table from wide format into a v long format, where each row represents a single observation (so a single gene and a single sample)
+            ### This transposed table is really big so you need a fairly high mem session for this.
+            transposed_counts <- melt(counts, id.vars = "gene_id", variable.name = "Sample_ID", value.name = "Burden")
+            ## dcast then takes the dataset in this long format and casts it back to a wide format, but this time with sample id as rows and genes as columns
+            transposed_counts <- dcast(transposed_counts, Sample_ID ~ gene_id, value.var = "Burden")
+            
+            # Write the transposed table out 
+            output_filename <- paste0('transposed_chr_', chr, '_', var, '_AC', AC, '_gene_counts.tsv')
+            fwrite(transposed_counts, output_filename, sep = "\t")
+
+            # Upload the file to your project using dx upload
+            upload_command <- paste('dx upload', shQuote(output_filename),'--destination Variant_counts/transposed_counts/')
+            system(upload_command)
+          } 
+        }
+    }
+}
+          
+```
+
+## Gene set counts 
+### AC21to50
+```{r}
+library(data.table)
+library(dplyr)
+AC='21to50' # run this same script with this set differently to edit AC! 
+chromosomes<-1:22
+variant_classes<-list('PTV', 'REVEL75_Miss', 'synonymous')
+
+for (var in variant_classes) {
+  input_filename <- sprintf('./Variant_counts/transposed_counts/AC%s/AC%s_%s/transposed*.tsv', AC, AC, var)
+  download_command <- sprintf('dx download %s', shQuote(input_filename))
+  system(download_command)
+}
+
+
+# Gene set annotations
+system('dx download ./gene_sets_for_RAP_Feb25.csv')
+sets=read.csv('gene_sets_for_RAP_Feb25.csv', header=T)
+
+
+# Gene set definitions
+gene_sets <- list(
+  pLI_0.9 = subset(sets, sets$pLI_constrained == TRUE)$gene_id,
+  non_constrained_pLI_lessthan0.9 = subset(sets, sets$pLI_constrained == FALSE)$gene_id,
+  brain_expressed = subset(sets, sets$Brain_expressed == TRUE)$gene_id,
+  non_brain_expressed = subset(sets, sets$Brain_expressed == F)$gene_id,
+  SCHEMA_FDR_US = subset(sets, sets$SCHEMA_FDR5_gene == TRUE)$gene_id,
+  SZ_GWAS_all = subset(sets, sets$SZ_GWAS_gene == TRUE)$gene_id,
+  SZ_GWAS_closest = subset(sets, sets$SZ_GWAS_closest_indexed_SNP == TRUE)$gene_id,
+  SZ_GWAS_credible_causal_US = subset(sets, sets$SZ_GWAS_credible_causal == TRUE)$gene_id,
+  NDD_CNVs_US = subset(sets, sets$NDD_CNV_gene == TRUE)$gene_id,
+  SZ_CNVs_US = subset(sets, sets$SZ_CNV_gene == TRUE)$gene_id)
+
+for (setname in names(gene_sets)) {
+  cat("\n### Processing gene set:", setname, "###\n")
+  gene_list <- gene_sets[[setname]]
+
+  for (var in variant_classes) {
+    cat("\nRunning variant class:", var, "\n")
+    geneset <- NULL  # initialise output
+
+    for (chr in chromosomes) {
+      cat("Processing chr", chr, "\n")
+
+      # Read and merge chr 1 halves
+      if (chr == 1) {
+        first_half <- fread(paste0('transposed_chr_1_first_half_', var, '_AC', AC, '_gene_counts.tsv'))
+        second_half <- fread(paste0('transposed_chr_1_second_half_', var, '_AC', AC, '_gene_counts.tsv'))
+
+        chr_data <- merge(first_half, second_half, by = "Sample_ID")
+        # Sum over duplicated gene (specific to ENSG00000198758)
+        chr_data$ENSG00000198758 <- chr_data$ENSG00000198758.x + chr_data$ENSG00000198758.y
+        chr_data <- chr_data %>% select(-ENSG00000198758.x, -ENSG00000198758.y)
+
+        # Clean up
+        rm(first_half, second_half)
+      } else {
+        chr_data <- fread(paste0('transposed_chr_', chr, '_', var, '_AC', AC, '_gene_counts.tsv'))
+      }
+
+      # Filter to gene list if set defined (skip for exome_wide)
+      if (!is.null(gene_list)) {
+        chr_data <- chr_data %>% select(c("Sample_ID", any_of(gene_list)))
+      }
+
+      # Skip empty sets
+      if (ncol(chr_data) <= 1) {
+        cat("No genes in this set for chr", chr, "\n")
+        rm(chr_data)
+        gc()
+        next
+      }
+
+      # Add chromosome total
+      chr_total_col <- paste0("chr_", chr, "_", var, "_AC", AC, "_total")
+      chr_data[[chr_total_col]] <- rowSums(chr_data[,-1], na.rm = TRUE)
+      chr_data <- chr_data %>% select("Sample_ID", chr_total_col)
+
+      # Merge
+      if (is.null(geneset)) {
+        geneset <- chr_data
+      } else {
+        geneset <- merge(geneset, chr_data, by = "Sample_ID", all = TRUE)
+      }
+
+      rm(chr_data)
+      gc()
+    }
+
+    # Final total per gene set
+    total_col <- paste0(var, "_AC", AC, "_", setname, "_total")
+    geneset[[total_col]] <- rowSums(geneset[,-1], na.rm = TRUE)
+    geneset <- select(geneset, c("Sample_ID", total_col))
+    cat("Total variants across all chromosomes:", sum(geneset[[2]], na.rm = TRUE), "\n")
+
+    # Save + upload
+    output <- paste0(setname, "_", var, "_AC", AC, "_counts.csv")
+    write.csv(geneset, output, row.names = FALSE)
+
+    upload_command <- paste("dx upload", output, "--destination ./Variant_counts/Gene_sets/")
+    system(upload_command)
+
+    cat("Completed:", output, "\n")
+  }
+}
+
+```
+
+### AC11to20
+```{r}
+library(data.table)
+library(dplyr)
+AC='11to20' # run this same script with this set differently to edit AC! 
+chromosomes<-1:22
+variant_classes<-list('PTV', 'REVEL75_Miss', 'synonymous')
+
+for (var in variant_classes) {
+  input_filename <- sprintf('./Variant_counts/transposed_counts/AC%s/AC%s_%s/transposed*.tsv', AC, AC, var)
+  download_command <- sprintf('dx download %s', shQuote(input_filename))
+  system(download_command)
+}
+
+
+# Gene set annotations
+system('dx download ./gene_sets_for_RAP_Feb25.csv')
+sets=read.csv('gene_sets_for_RAP_Feb25.csv', header=T)
+
+
+# Gene set definitions
+gene_sets <- list(
+  pLI_0.9 = subset(sets, sets$pLI_constrained == TRUE)$gene_id,
+  non_constrained_pLI_lessthan0.9 = subset(sets, sets$pLI_constrained == FALSE)$gene_id,
+  brain_expressed = subset(sets, sets$Brain_expressed == TRUE)$gene_id,
+  non_brain_expressed = subset(sets, sets$Brain_expressed == F)$gene_id,
+  SCHEMA_FDR_US = subset(sets, sets$SCHEMA_FDR5_gene == TRUE)$gene_id,
+  SZ_GWAS_all = subset(sets, sets$SZ_GWAS_gene == TRUE)$gene_id,
+  SZ_GWAS_closest = subset(sets, sets$SZ_GWAS_closest_indexed_SNP == TRUE)$gene_id,
+  SZ_GWAS_credible_causal_US = subset(sets, sets$SZ_GWAS_credible_causal == TRUE)$gene_id,
+  NDD_CNVs_US = subset(sets, sets$NDD_CNV_gene == TRUE)$gene_id,
+  SZ_CNVs_US = subset(sets, sets$SZ_CNV_gene == TRUE)$gene_id)
+
+for (setname in names(gene_sets)) {
+  cat("\n### Processing gene set:", setname, "###\n")
+  gene_list <- gene_sets[[setname]]
+
+  for (var in variant_classes) {
+    cat("\nRunning variant class:", var, "\n")
+    geneset <- NULL  # initialise output
+
+    for (chr in chromosomes) {
+      cat("Processing chr", chr, "\n")
+
+      # Read and merge chr 1 halves
+      if (chr == 1) {
+        first_half <- fread(paste0('transposed_chr_1_first_half_', var, '_AC', AC, '_gene_counts.tsv'))
+        second_half <- fread(paste0('transposed_chr_1_second_half_', var, '_AC', AC, '_gene_counts.tsv'))
+
+        chr_data <- merge(first_half, second_half, by = "Sample_ID")
+        # Sum over duplicated gene (specific to ENSG00000198758)
+        chr_data$ENSG00000198758 <- chr_data$ENSG00000198758.x + chr_data$ENSG00000198758.y
+        chr_data <- chr_data %>% select(-ENSG00000198758.x, -ENSG00000198758.y)
+
+        # Clean up
+        rm(first_half, second_half)
+      } else {
+        chr_data <- fread(paste0('transposed_chr_', chr, '_', var, '_AC', AC, '_gene_counts.tsv'))
+      }
+
+      # Filter to gene list if set defined (skip for exome_wide)
+      if (!is.null(gene_list)) {
+        chr_data <- chr_data %>% select(c("Sample_ID", any_of(gene_list)))
+      }
+
+      # Skip empty sets
+      if (ncol(chr_data) <= 1) {
+        cat("No genes in this set for chr", chr, "\n")
+        rm(chr_data)
+        gc()
+        next
+      }
+
+      # Add chromosome total
+      chr_total_col <- paste0("chr_", chr, "_", var, "_AC", AC, "_total")
+      chr_data[[chr_total_col]] <- rowSums(chr_data[,-1], na.rm = TRUE)
+      chr_data <- chr_data %>% select("Sample_ID", chr_total_col)
+
+      # Merge
+      if (is.null(geneset)) {
+        geneset <- chr_data
+      } else {
+        geneset <- merge(geneset, chr_data, by = "Sample_ID", all = TRUE)
+      }
+
+      rm(chr_data)
+      gc()
+    }
+
+    # Final total per gene set
+    total_col <- paste0(var, "_AC", AC, "_", setname, "_total")
+    geneset[[total_col]] <- rowSums(geneset[,-1], na.rm = TRUE)
+    geneset <- select(geneset, c("Sample_ID", total_col))
+    cat("Total variants across all chromosomes:", sum(geneset[[2]], na.rm = TRUE), "\n")
+
+    # Save + upload
+    output <- paste0(setname, "_", var, "_AC", AC, "_counts.csv")
+    write.csv(geneset, output, row.names = FALSE)
+
+    upload_command <- paste("dx upload", output, "--destination ./Variant_counts/Gene_sets/")
+    system(upload_command)
+
+    cat("Completed:", output, "\n")
+  }
+}
+
+```
+
+### AC6to10
+```{r}
+library(data.table)
+library(dplyr)
+AC='6to10' # run this same script with this set differently to edit AC! 
+chromosomes<-1:22
+variant_classes<-list('PTV', 'REVEL75_Miss', 'synonymous')
+
+for (var in variant_classes) {
+  input_filename <- sprintf('./Variant_counts/transposed_counts/AC%s/AC%s_%s/transposed*.tsv', AC, AC, var)
+  download_command <- sprintf('dx download %s', shQuote(input_filename))
+  system(download_command)
+}
+
+
+# Gene set annotations
+system('dx download ./gene_sets_for_RAP_Feb25.csv')
+sets=read.csv('gene_sets_for_RAP_Feb25.csv', header=T)
+
+
+# Gene set definitions
+gene_sets <- list(
+  pLI_0.9 = subset(sets, sets$pLI_constrained == TRUE)$gene_id,
+  non_constrained_pLI_lessthan0.9 = subset(sets, sets$pLI_constrained == FALSE)$gene_id,
+  brain_expressed = subset(sets, sets$Brain_expressed == TRUE)$gene_id,
+  non_brain_expressed = subset(sets, sets$Brain_expressed == F)$gene_id,
+  SCHEMA_FDR_US = subset(sets, sets$SCHEMA_FDR5_gene == TRUE)$gene_id,
+  SZ_GWAS_all = subset(sets, sets$SZ_GWAS_gene == TRUE)$gene_id,
+  SZ_GWAS_closest = subset(sets, sets$SZ_GWAS_closest_indexed_SNP == TRUE)$gene_id,
+  SZ_GWAS_credible_causal_US = subset(sets, sets$SZ_GWAS_credible_causal == TRUE)$gene_id,
+  NDD_CNVs_US = subset(sets, sets$NDD_CNV_gene == TRUE)$gene_id,
+  SZ_CNVs_US = subset(sets, sets$SZ_CNV_gene == TRUE)$gene_id)
+
+for (setname in names(gene_sets)) {
+  cat("\n### Processing gene set:", setname, "###\n")
+  gene_list <- gene_sets[[setname]]
+
+  for (var in variant_classes) {
+    cat("\nRunning variant class:", var, "\n")
+    geneset <- NULL  # initialise output
+
+    for (chr in chromosomes) {
+      cat("Processing chr", chr, "\n")
+
+      # Read and merge chr 1 halves
+      if (chr == 1) {
+        first_half <- fread(paste0('transposed_chr_1_first_half_', var, '_AC', AC, '_gene_counts.tsv'))
+        second_half <- fread(paste0('transposed_chr_1_second_half_', var, '_AC', AC, '_gene_counts.tsv'))
+
+        chr_data <- merge(first_half, second_half, by = "Sample_ID")
+        # Sum over duplicated gene (specific to ENSG00000198758)
+        chr_data$ENSG00000198758 <- chr_data$ENSG00000198758.x + chr_data$ENSG00000198758.y
+        chr_data <- chr_data %>% select(-ENSG00000198758.x, -ENSG00000198758.y)
+
+        # Clean up
+        rm(first_half, second_half)
+      } else {
+        chr_data <- fread(paste0('transposed_chr_', chr, '_', var, '_AC', AC, '_gene_counts.tsv'))
+      }
+
+      # Filter to gene list if set defined (skip for exome_wide)
+      if (!is.null(gene_list)) {
+        chr_data <- chr_data %>% select(c("Sample_ID", any_of(gene_list)))
+      }
+
+      # Skip empty sets
+      if (ncol(chr_data) <= 1) {
+        cat("No genes in this set for chr", chr, "\n")
+        rm(chr_data)
+        gc()
+        next
+      }
+
+      # Add chromosome total
+      chr_total_col <- paste0("chr_", chr, "_", var, "_AC", AC, "_total")
+      chr_data[[chr_total_col]] <- rowSums(chr_data[,-1], na.rm = TRUE)
+      chr_data <- chr_data %>% select("Sample_ID", chr_total_col)
+
+      # Merge
+      if (is.null(geneset)) {
+        geneset <- chr_data
+      } else {
+        geneset <- merge(geneset, chr_data, by = "Sample_ID", all = TRUE)
+      }
+
+      rm(chr_data)
+      gc()
+    }
+
+    # Final total per gene set
+    total_col <- paste0(var, "_AC", AC, "_", setname, "_total")
+    geneset[[total_col]] <- rowSums(geneset[,-1], na.rm = TRUE)
+    geneset <- select(geneset, c("Sample_ID", total_col))
+    cat("Total variants across all chromosomes:", sum(geneset[[2]], na.rm = TRUE), "\n")
+
+    # Save + upload
+    output <- paste0(setname, "_", var, "_AC", AC, "_counts.csv")
+    write.csv(geneset, output, row.names = FALSE)
+
+    upload_command <- paste("dx upload", output, "--destination ./Variant_counts/Gene_sets/")
+    system(upload_command)
+
+    cat("Completed:", output, "\n")
+  }
+}
+
+```
+
+### Less deleterious missense 
+```{r}
+library(data.table)
+library(dplyr)
+AC='5orless' # run this same script with this set differently to edit AC! 
+chromosomes<-1:22
+variant_classes<-list('mid_REVEL50to75_Miss', 'benign_REVEL50_Miss')
+
+for (var in variant_classes) {
+  input_filename <- sprintf('Variant_counts/transposed_counts/AC%s/AC%s_%s/transposed*.tsv', AC, AC, var)
+  download_command <- sprintf('dx download %s', shQuote(input_filename))
+  system(download_command)
+}
+
+
+# Gene set annotations
+system('dx download ./gene_sets_for_RAP_Feb25.csv')
+sets=read.csv('gene_sets_for_RAP_Feb25.csv', header=T)
+
+
+# Gene set definitions
+gene_sets <- list(
+  pLI_0.9 = subset(sets, sets$pLI_constrained == TRUE)$gene_id,
+  non_constrained_pLI_lessthan0.9 = subset(sets, sets$pLI_constrained == FALSE)$gene_id,
+  brain_expressed = subset(sets, sets$Brain_expressed == TRUE)$gene_id,
+  non_brain_expressed = subset(sets, sets$Brain_expressed == F)$gene_id,
+  SCHEMA_FDR_US = subset(sets, sets$SCHEMA_FDR5_gene == TRUE)$gene_id,
+  SZ_GWAS_all = subset(sets, sets$SZ_GWAS_gene == TRUE)$gene_id,
+  SZ_GWAS_closest = subset(sets, sets$SZ_GWAS_closest_indexed_SNP == TRUE)$gene_id,
+  SZ_GWAS_credible_causal_US = subset(sets, sets$SZ_GWAS_credible_causal == TRUE)$gene_id,
+  NDD_CNVs_US = subset(sets, sets$NDD_CNV_gene == TRUE)$gene_id,
+  SZ_CNVs_US = subset(sets, sets$SZ_CNV_gene == TRUE)$gene_id)
+
+for (setname in names(gene_sets)) {
+  cat("\n### Processing gene set:", setname, "###\n")
+  gene_list <- gene_sets[[setname]]
+
+  for (var in variant_classes) {
+    cat("\nRunning variant class:", var, "\n")
+    geneset <- NULL  # initialise output
+
+    for (chr in chromosomes) {
+      cat("Processing chr", chr, "\n")
+
+      # Read and merge chr 1 halves
+      if (chr == 1) {
+        first_half <- fread(paste0('transposed_chr_1_first_half_', var, '_AC', AC, '_gene_counts.tsv'))
+        second_half <- fread(paste0('transposed_chr_1_second_half_', var, '_AC', AC, '_gene_counts.tsv'))
+
+        chr_data <- merge(first_half, second_half, by = "Sample_ID")
+        # Sum over duplicated gene (specific to ENSG00000198758)
+        chr_data$ENSG00000198758 <- chr_data$ENSG00000198758.x + chr_data$ENSG00000198758.y
+        chr_data <- chr_data %>% select(-ENSG00000198758.x, -ENSG00000198758.y)
+
+        # Clean up
+        rm(first_half, second_half)
+      } else {
+        chr_data <- fread(paste0('transposed_chr_', chr, '_', var, '_AC', AC, '_gene_counts.tsv'))
+      }
+
+      # Filter to gene list if set defined (skip for exome_wide)
+      if (!is.null(gene_list)) {
+        chr_data <- chr_data %>% select(c("Sample_ID", any_of(gene_list)))
+      }
+
+      # Skip empty sets
+      if (ncol(chr_data) <= 1) {
+        cat("No genes in this set for chr", chr, "\n")
+        rm(chr_data)
+        gc()
+        next
+      }
+
+      # Add chromosome total
+      chr_total_col <- paste0("chr_", chr, "_", var, "_AC", AC, "_total")
+      chr_data[[chr_total_col]] <- rowSums(chr_data[,-1], na.rm = TRUE)
+      chr_data <- chr_data %>% select("Sample_ID", chr_total_col)
+
+      # Merge
+      if (is.null(geneset)) {
+        geneset <- chr_data
+      } else {
+        geneset <- merge(geneset, chr_data, by = "Sample_ID", all = TRUE)
+      }
+
+      rm(chr_data)
+      gc()
+    }
+
+    # Final total per gene set
+    total_col <- paste0(var, "_AC", AC, "_", setname, "_total")
+    geneset[[total_col]] <- rowSums(geneset[,-1], na.rm = TRUE)
+    geneset <- select(geneset, c("Sample_ID", total_col))
+    cat("Total variants across all chromosomes:", sum(geneset[[2]], na.rm = TRUE), "\n")
+
+    # Save + upload
+    output <- paste0(setname, "_", var, "_AC", AC, "_counts.csv")
+    write.csv(geneset, output, row.names = FALSE)
+
+    upload_command <- paste("dx upload", output, "--destination ./Variant_counts/Gene_sets/")
+    system(upload_command)
+
+    cat("Completed:", output, "\n")
+  }
+}
+
+```
+
+### Exome wide counts for ACs>5
+#### 21to50
+```{r}
+library(data.table)
+library(dplyr)
+AC='21to50' # run this same script with this set differently to edit AC! 
+chromosomes<-1:22
+variant_classes<-list('PTV', 'REVEL75_Miss', 'synonymous')
+
+for (var in variant_classes) {
+  input_filename <- sprintf('./Variant_counts/transposed_counts/AC%s/AC%s_%s/transposed*.tsv', AC, AC, var)
+  download_command <- sprintf('dx download %s', shQuote(input_filename))
+  system(download_command)
+}
+
+
+setname='exome_wide'
+for (var in variant_classes){
+  print(paste0('Running variant class ', var))
+  for (chr in chromosomes) {
+    # Process chr1 differently (as it's in 2 halves)
+      if (chr==1) {
+        # Read in 
+        first_half <- paste0('transposed_chr_1_first_half_', var, '_AC', AC,'_gene_counts.tsv')
+        first_half <- fread(first_half, header=TRUE, stringsAsFactors=FALSE)
+        second_half <- paste0('transposed_chr_1_second_half_', var, '_AC', AC,'_gene_counts.tsv')
+        second_half <- fread(second_half, header=TRUE, stringsAsFactors=FALSE)
+
+        # Merge to one table and add up the gene split across the two halves
+        chr1 <- merge(first_half, second_half, by = "Sample_ID")
+        chr1$ENSG00000198758 <- chr1$ENSG00000198758.x + chr1$ENSG00000198758.y
+        chr1 <- chr1 %>% select(-ENSG00000198758.x, -ENSG00000198758.y)
+        cat('n genes in chr 1:', length(chr1) - 1, '\n')
+        
+
+        chr1[[paste0("chr_1_", var,"_AC", AC, "_total")]] <- rowSums(chr1[,-1])
+        geneset<-select(chr1, c("Sample_ID", paste0("chr_1_", var,"_AC", AC, "_total")))
+        rm(chr1)
+        rm(first_half)
+        rm(second_half)
+        gc()
+      }
+     else {
+        # All other chromosomes
+        filename <- paste0('transposed_chr_', chr, '_', var, '_AC', AC,'_gene_counts.tsv')
+        input <- fread(filename, header=TRUE, stringsAsFactors=FALSE)
+        print(paste0('Processing chr ', chr))
+        cat('n genes in chr:', length(input) - 1, '\n')
+        chr_set<-input
+        # Add up variants in genes in set 
+        chr_set[[paste0("chr_", chr, "_", var,"_AC", AC, "_total")]] <- rowSums(chr_set[,-1])
+        chr_set<-select(chr_set, c("Sample_ID", paste0("chr_",chr, "_", var,"_AC", AC, "_total")))
+        
+        # Merge to big table and print length (to show increasing in size!!)
+        geneset<-merge(geneset, chr_set, by='Sample_ID')
+        cat('n vars in set in chr:', sum(geneset[[paste0("chr_", chr, "_", var,"_AC", AC, "_total")]]))
+        
+        # Clear mem
+        rm(input)
+        rm(chr_set)
+        gc()}}
+
+  # Add up across all chromosomes 
+  geneset[[paste0(var,"_AC", AC, "_", setname, "_total")]] <- rowSums(geneset[,-1])
+  geneset <- select(geneset, c("Sample_ID", paste0(var,"_AC", AC, "_", setname, "_total")))
+  print(sum(geneset[[2]]))
+
+  # Save out 
+  output <- paste0(setname, '_', var, '_AC', AC, '_counts.csv')
+  write.csv(geneset, output)
+
+
+  upload_command <- paste('dx upload ', output, '--destination ./Variant_counts/Gene_sets/')
+  system(upload_command)
+}
+```
+
+#### 11to20
+```{r}
+library(data.table)
+library(dplyr)
+AC='11to20' # run this same script with this set differently to edit AC! 
+chromosomes<-1:22
+variant_classes<-list('PTV', 'REVEL75_Miss', 'synonymous')
+
+for (var in variant_classes) {
+  input_filename <- sprintf('./Variant_counts/transposed_counts/AC%s/AC%s_%s/transposed*.tsv', AC, AC, var)
+  download_command <- sprintf('dx download %s', shQuote(input_filename))
+  system(download_command)
+}
+
+
+setname='exome_wide'
+for (var in variant_classes){
+  print(paste0('Running variant class ', var))
+  for (chr in chromosomes) {
+    # Process chr1 differently (as it's in 2 halves)
+      if (chr==1) {
+        # Read in 
+        first_half <- paste0('transposed_chr_1_first_half_', var, '_AC', AC,'_gene_counts.tsv')
+        first_half <- fread(first_half, header=TRUE, stringsAsFactors=FALSE)
+        second_half <- paste0('transposed_chr_1_second_half_', var, '_AC', AC,'_gene_counts.tsv')
+        second_half <- fread(second_half, header=TRUE, stringsAsFactors=FALSE)
+
+        # Merge to one table and add up the gene split across the two halves
+        chr1 <- merge(first_half, second_half, by = "Sample_ID")
+        chr1$ENSG00000198758 <- chr1$ENSG00000198758.x + chr1$ENSG00000198758.y
+        chr1 <- chr1 %>% select(-ENSG00000198758.x, -ENSG00000198758.y)
+        cat('n genes in chr 1:', length(chr1) - 1, '\n')
+        
+
+        chr1[[paste0("chr_1_", var,"_AC", AC, "_total")]] <- rowSums(chr1[,-1])
+        geneset<-select(chr1, c("Sample_ID", paste0("chr_1_", var,"_AC", AC, "_total")))
+        rm(chr1)
+        rm(first_half)
+        rm(second_half)
+        gc()
+      }
+     else {
+        # All other chromosomes
+        filename <- paste0('transposed_chr_', chr, '_', var, '_AC', AC,'_gene_counts.tsv')
+        input <- fread(filename, header=TRUE, stringsAsFactors=FALSE)
+        print(paste0('Processing chr ', chr))
+        cat('n genes in chr:', length(input) - 1, '\n')
+        chr_set<-input
+        # Add up variants in genes in set 
+        chr_set[[paste0("chr_", chr, "_", var,"_AC", AC, "_total")]] <- rowSums(chr_set[,-1])
+        chr_set<-select(chr_set, c("Sample_ID", paste0("chr_",chr, "_", var,"_AC", AC, "_total")))
+        
+        # Merge to big table and print length (to show increasing in size!!)
+        geneset<-merge(geneset, chr_set, by='Sample_ID')
+        cat('n vars in set in chr:', sum(geneset[[paste0("chr_", chr, "_", var,"_AC", AC, "_total")]]))
+        
+        # Clear mem
+        rm(input)
+        rm(chr_set)
+        gc()}}
+
+  # Add up across all chromosomes 
+  geneset[[paste0(var,"_AC", AC, "_", setname, "_total")]] <- rowSums(geneset[,-1])
+  geneset <- select(geneset, c("Sample_ID", paste0(var,"_AC", AC, "_", setname, "_total")))
+  print(sum(geneset[[2]]))
+
+  # Save out 
+  output <- paste0(setname, '_', var, '_AC', AC, '_counts.csv')
+  write.csv(geneset, output)
+
+
+  upload_command <- paste('dx upload ', output, '--destination ./Variant_counts/Gene_sets/')
+  system(upload_command)
+}
+```
+
+
+#### 6to10
+```{r}
+library(data.table)
+library(dplyr)
+AC='6to10' # run this same script with this set differently to edit AC! 
+chromosomes<-1:22
+variant_classes<-list('PTV', 'REVEL75_Miss', 'synonymous')
+
+for (var in variant_classes) {
+  input_filename <- sprintf('./Variant_counts/transposed_counts/AC%s/AC%s_%s/transposed*.tsv', AC, AC, var)
+  download_command <- sprintf('dx download %s', shQuote(input_filename))
+  system(download_command)
+}
+
+
+setname='exome_wide'
+for (var in variant_classes){
+  print(paste0('Running variant class ', var))
+  for (chr in chromosomes) {
+    # Process chr1 differently (as it's in 2 halves)
+      if (chr==1) {
+        # Read in 
+        first_half <- paste0('transposed_chr_1_first_half_', var, '_AC', AC,'_gene_counts.tsv')
+        first_half <- fread(first_half, header=TRUE, stringsAsFactors=FALSE)
+        second_half <- paste0('transposed_chr_1_second_half_', var, '_AC', AC,'_gene_counts.tsv')
+        second_half <- fread(second_half, header=TRUE, stringsAsFactors=FALSE)
+
+        # Merge to one table and add up the gene split across the two halves
+        chr1 <- merge(first_half, second_half, by = "Sample_ID")
+        chr1$ENSG00000198758 <- chr1$ENSG00000198758.x + chr1$ENSG00000198758.y
+        chr1 <- chr1 %>% select(-ENSG00000198758.x, -ENSG00000198758.y)
+        cat('n genes in chr 1:', length(chr1) - 1, '\n')
+        
+
+        chr1[[paste0("chr_1_", var,"_AC", AC, "_total")]] <- rowSums(chr1[,-1])
+        geneset<-select(chr1, c("Sample_ID", paste0("chr_1_", var,"_AC", AC, "_total")))
+        rm(chr1)
+        rm(first_half)
+        rm(second_half)
+        gc()
+      }
+     else {
+        # All other chromosomes
+        filename <- paste0('transposed_chr_', chr, '_', var, '_AC', AC,'_gene_counts.tsv')
+        input <- fread(filename, header=TRUE, stringsAsFactors=FALSE)
+        print(paste0('Processing chr ', chr))
+        cat('n genes in chr:', length(input) - 1, '\n')
+        chr_set<-input
+        # Add up variants in genes in set 
+        chr_set[[paste0("chr_", chr, "_", var,"_AC", AC, "_total")]] <- rowSums(chr_set[,-1])
+        chr_set<-select(chr_set, c("Sample_ID", paste0("chr_",chr, "_", var,"_AC", AC, "_total")))
+        
+        # Merge to big table and print length (to show increasing in size!!)
+        geneset<-merge(geneset, chr_set, by='Sample_ID')
+        cat('n vars in set in chr:', sum(geneset[[paste0("chr_", chr, "_", var,"_AC", AC, "_total")]]))
+        
+        # Clear mem
+        rm(input)
+        rm(chr_set)
+        gc()}}
+
+  # Add up across all chromosomes 
+  geneset[[paste0(var,"_AC", AC, "_", setname, "_total")]] <- rowSums(geneset[,-1])
+  geneset <- select(geneset, c("Sample_ID", paste0(var,"_AC", AC, "_", setname, "_total")))
+  print(sum(geneset[[2]]))
+
+  # Save out 
+  output <- paste0(setname, '_', var, '_AC', AC, '_counts.csv')
+  write.csv(geneset, output)
+
+
+  upload_command <- paste('dx upload ', output, '--destination ./Variant_counts/Gene_sets/')
+  system(upload_command)
+}
+```
+
+## Regressions
+### Set up
+```{r}
+library(data.table)
+library(dplyr)
+library(purrr)
+install.packages('broom')
+library(broom)
+library(ggplot2)
+
+# READ IN
+# Phenotypes
+system('dx download ./phenotype_cohorts/processed_cognition/processed_cog_tests_inc_g_Feb24.csv')
+phen=read.csv('processed_cog_tests_inc_g_Feb24.csv', header=T)
+# Ancestries
+system('dx download ./genetic_ancestries/ancestries_PCs.csv')
+ancs = read.csv('ancestries_PCs.csv')
+phen=merge(phen, ancs, by.x = 'eid', by.y='eid_13310')
+# QC
+system('dx download ./WES_QC/discordant_sex_ids.csv')
+ids_to_rm=read.csv('discordant_sex_ids.csv')
+ids_to_rm$remove=T
+phen=merge(phen, ids_to_rm, by.x = 'eid', by.y='x', all=T)
+phen=subset(phen, is.na(phen$remove)) 
+# Covars
+system('dx download ./phenotype_cohorts/covars_participant.csv')
+covars=read.csv('covars_participant.csv', header=T)
+covars$seq_batch<-covars$p32050
+covars$AC_attended<-covars$p54_i0
+covars$sex_1male[covars$p31 == 'Male']<-1
+covars$sex_1male[covars$p31 == 'Female']<-2
+covars$standardised_age <- (covars$p21022 - mean(covars$p21022, na.rm = TRUE)) / sd(covars$p21022, na.rm = TRUE)
+covars$standardised_age_squared<-covars$standardised_age*covars$standardised_age
+covars$sex_standardised_age<-covars$sex_1male * covars$standardised_age
+covars$sex_standardised_age_squared<-covars$sex_1male * covars$standardised_age_squared
+phen=merge(phen, covars, by.x='eid', by.y='eid')
+# Diagnoses
+system('dx download ./phenotypes_cog_diagnoses_participation_death.csv')
+diagnoses=read.csv('phenotypes_cog_diagnoses_participation_death.csv', header=T)
+# Remove people with SZ, ID and/or ASD 
+diagnoses=subset(diagnoses, diagnoses$SZ==F & diagnoses$ASD==F & diagnoses$intellectual_disability==F) 
+diagnoses$no_diagnoses<-T
+diagnoses=diagnoses[,c(3,174)]
+phen=merge(phen, diagnoses, by='eid') 
+# EUR ancs
+all_ancs=phen
+all_ancs_bu = all_ancs
+
+```
+
+### AC5 or less - mid and benign missense 
+```{r}
+# Gene set counts
+AC='5orless'
+system('dx download ./Variant_counts/Gene_sets/*_AC5orless_*.csv --overwrite')
+file_list <- list.files(path = "./", pattern = "*_AC5orless_counts.csv", full.names = TRUE)
+counts <- lapply(file_list, function(file) {
+  data <- fread(file)  # Read the file
+  data[, V1 := NULL]  # Drop the first column (V1)
+  return(data)
+}) %>%
+reduce(function(x, y) merge(x, y, by = "Sample_ID", all = TRUE))  # Merge the data frames
+all_ancs=merge(phen, counts, by.x='eid', by.y='Sample_ID') 
+EU_ancs=subset(all_ancs, all_ancs$EUR>0.8) 
+
+# SET UP
+covars_Eu_anc_NS <- 'seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + sex_standardised_age + sex_standardised_age_squared + synonymous_AC5orless_exome_wide_total + AAC + EAS + LAT + SAS + EU_PC1 + EU_PC2 + EU_PC3 + EU_PC4 + EU_PC5 + EU_PC6 + EU_PC7 + EU_PC8 + EU_PC9 + EU_PC10' # SSA removed here as no one defined as EUR anc has a non-zero SSA probability. 
+covars_Eu_anc_syn <- 'seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + sex_standardised_age + sex_standardised_age_squared + AAC + EAS + LAT + SAS + EU_PC1 + EU_PC2 + EU_PC3 + EU_PC4 + EU_PC5 + EU_PC6 + EU_PC7 + EU_PC8 + EU_PC9 + EU_PC10'
+results <- data.frame(
+  gene_set=character(),
+  dep_var = character(),
+  indep_var = character(),
+  allele_count = numeric(),
+  beta = numeric(),
+  SE = numeric(),
+  lower_CI = numeric(),
+  upper_CI = numeric(),
+  p_value = numeric(),
+  n_vars = integer(),
+  n_people = integer(),
+  ancestry=character(),
+  stringsAsFactors = FALSE)
+
+
+# REGRESS
+# Non-synonymous vars 
+sets <- list('pLI_0.9','non_constrained_pLI_lessthan0.9',
+             'brain_expressed','non_brain_expressed',
+             'SZ_GWAS_all', 'SZ_GWAS_closest', 'SZ_GWAS_credible_causal_US',
+             'NDD_CNVs_US', 'SZ_CNVs_US',
+             'SCHEMA_FDR_US')
+var_types<-list('mid_REVEL50to75_Miss', 'benign_REVEL50_Miss')
+dependent_var<-list('g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm')
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_NS))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+# Write out results 
+write.csv(results, 'results_g_regressions_AC5orless_lessdelmiss_diagnosesrm_incSE_Eurancs.csv')
+system('dx upload results_g_regressions_AC5orless_lessdelmiss_diagnosesrm_incSE_Eurancs.csv --destination ./Variant_counts/Gene_sets/')
+```
+
+### AC6to10
+```{r}
+# Gene set counts
+AC='6to10'
+system('dx download ./Variant_counts/Gene_sets/*_AC6to10_*.csv --overwrite')
+file_list <- list.files(path = "./", pattern = "*_AC6to10_counts.csv", full.names = TRUE)
+counts <- lapply(file_list, function(file) {
+  data <- fread(file)  # Read the file
+  data[, V1 := NULL]  # Drop the first column (V1)
+  return(data)
+}) %>%
+reduce(function(x, y) merge(x, y, by = "Sample_ID", all = TRUE))  # Merge the data frames
+all_ancs=merge(phen, counts, by.x='eid', by.y='Sample_ID') 
+EU_ancs=subset(all_ancs, all_ancs$EUR>0.8) 
+
+# SET UP
+covars_Eu_anc_NS <- 'seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + sex_standardised_age + sex_standardised_age_squared + synonymous_AC6to10_exome_wide_total + AAC + EAS + LAT + SAS + EU_PC1 + EU_PC2 + EU_PC3 + EU_PC4 + EU_PC5 + EU_PC6 + EU_PC7 + EU_PC8 + EU_PC9 + EU_PC10' # SSA removed here as no one defined as EUR anc has a non-zero SSA probability. 
+covars_Eu_anc_syn <- 'seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + sex_standardised_age + sex_standardised_age_squared + AAC + EAS + LAT + SAS + EU_PC1 + EU_PC2 + EU_PC3 + EU_PC4 + EU_PC5 + EU_PC6 + EU_PC7 + EU_PC8 + EU_PC9 + EU_PC10'
+results <- data.frame(
+  gene_set=character(),
+  dep_var = character(),
+  indep_var = character(),
+  allele_count = numeric(),
+  beta = numeric(),
+  SE = numeric(),
+  lower_CI = numeric(),
+  upper_CI = numeric(),
+  p_value = numeric(),
+  n_vars = integer(),
+  n_people = integer(),
+  ancestry=character(),
+  stringsAsFactors = FALSE)
+
+
+# REGRESS
+# Non-synonymous vars 
+sets <- list('pLI_0.9','non_constrained_pLI_lessthan0.9',
+             'brain_expressed','non_brain_expressed',
+             'SZ_GWAS_all', 'SZ_GWAS_closest', 'SZ_GWAS_credible_causal_US',
+             'NDD_CNVs_US', 'SZ_CNVs_US',
+             'SCHEMA_FDR_US')
+var_types<-list('PTV', 'REVEL75_Miss')
+dependent_var<-list('g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm')
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_NS))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+
+
+# Synonymous vars  
+var_types<-list('synonymous')
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_syn))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+
+# Write out results 
+write.csv(results, 'results_g_regressions_AC6to10_diagnosesrm_incSE_Eurancs.csv')
+system('dx upload results_g_regressions_AC6to10_diagnosesrm_incSE_Eurancs.csv --destination ./Variant_counts/Gene_sets/')
+```
+
+
+
+
+
+
+### AC11to20
+```{r}
+# Gene set counts
+AC='11to20'
+system('dx download ./Variant_counts/Gene_sets/*_AC11to20_*.csv --overwrite')
+file_list <- list.files(path = "./", pattern = "*_AC11to20_counts.csv", full.names = TRUE)
+counts <- lapply(file_list, function(file) {
+  data <- fread(file)  # Read the file
+  data[, V1 := NULL]  # Drop the first column (V1)
+  return(data)
+}) %>%
+reduce(function(x, y) merge(x, y, by = "Sample_ID", all = TRUE))  # Merge the data frames
+all_ancs=merge(phen, counts, by.x='eid', by.y='Sample_ID') 
+EU_ancs=subset(all_ancs, all_ancs$EUR>0.8) 
+
+# SET UP
+covars_Eu_anc_NS <- 'seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + sex_standardised_age + sex_standardised_age_squared + synonymous_AC11to20_exome_wide_total + AAC + EAS + LAT + SAS + EU_PC1 + EU_PC2 + EU_PC3 + EU_PC4 + EU_PC5 + EU_PC6 + EU_PC7 + EU_PC8 + EU_PC9 + EU_PC10' # SSA removed here as no one defined as EUR anc has a non-zero SSA probability. 
+covars_Eu_anc_syn <- 'seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + sex_standardised_age + sex_standardised_age_squared + AAC + EAS + LAT + SAS + EU_PC1 + EU_PC2 + EU_PC3 + EU_PC4 + EU_PC5 + EU_PC6 + EU_PC7 + EU_PC8 + EU_PC9 + EU_PC10'
+results <- data.frame(
+  gene_set=character(),
+  dep_var = character(),
+  indep_var = character(),
+  allele_count = numeric(),
+  beta = numeric(),
+  SE = numeric(),
+  lower_CI = numeric(),
+  upper_CI = numeric(),
+  p_value = numeric(),
+  n_vars = integer(),
+  n_people = integer(),
+  ancestry=character(),
+  stringsAsFactors = FALSE)
+
+
+# REGRESS
+# Non-synonymous vars 
+sets <- list('pLI_0.9','non_constrained_pLI_lessthan0.9',
+             'brain_expressed','non_brain_expressed',
+             'SZ_GWAS_all', 'SZ_GWAS_closest', 'SZ_GWAS_credible_causal_US',
+             'NDD_CNVs_US', 'SZ_CNVs_US',
+             'SCHEMA_FDR_US')
+var_types<-list('PTV', 'REVEL75_Miss')
+dependent_var<-list('g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm')
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_NS))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+
+
+# Synonymous vars  
+var_types<-list('synonymous')
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_syn))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+
+# Write out results 
+write.csv(results, 'results_g_regressions_AC11to20_diagnosesrm_incSE_Eurancs.csv')
+system('dx upload results_g_regressions_AC11to20_diagnosesrm_incSE_Eurancs.csv --destination ./Variant_counts/Gene_sets/')
+```
+
+
+
+
+
+
+### AC21to50
+```{r}
+# Gene set counts
+AC='21to50'
+system('dx download ./Variant_counts/Gene_sets/*_AC21to50_*.csv --overwrite')
+file_list <- list.files(path = "./", pattern = "*_AC21to50_counts.csv", full.names = TRUE)
+counts <- lapply(file_list, function(file) {
+  data <- fread(file)  # Read the file
+  data[, V1 := NULL]  # Drop the first column (V1)
+  return(data)
+}) %>%
+reduce(function(x, y) merge(x, y, by = "Sample_ID", all = TRUE))  # Merge the data frames
+all_ancs=merge(phen, counts, by.x='eid', by.y='Sample_ID') 
+EU_ancs=subset(all_ancs, all_ancs$EUR>0.8) 
+
+# SET UP
+covars_Eu_anc_NS <- 'seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + sex_standardised_age + sex_standardised_age_squared + synonymous_AC21to50_exome_wide_total + AAC + EAS + LAT + SAS + EU_PC1 + EU_PC2 + EU_PC3 + EU_PC4 + EU_PC5 + EU_PC6 + EU_PC7 + EU_PC8 + EU_PC9 + EU_PC10' # SSA removed here as no one defined as EUR anc has a non-zero SSA probability. 
+covars_Eu_anc_syn <- 'seq_batch + AC_attended + sex_1male + standardised_age + standardised_age_squared + sex_standardised_age + sex_standardised_age_squared + AAC + EAS + LAT + SAS + EU_PC1 + EU_PC2 + EU_PC3 + EU_PC4 + EU_PC5 + EU_PC6 + EU_PC7 + EU_PC8 + EU_PC9 + EU_PC10'
+results <- data.frame(
+  gene_set=character(),
+  dep_var = character(),
+  indep_var = character(),
+  allele_count = numeric(),
+  beta = numeric(),
+  SE = numeric(),
+  lower_CI = numeric(),
+  upper_CI = numeric(),
+  p_value = numeric(),
+  n_vars = integer(),
+  n_people = integer(),
+  ancestry=character(),
+  stringsAsFactors = FALSE)
+
+
+# REGRESS
+# Non-synonymous vars 
+sets <- list('pLI_0.9','non_constrained_pLI_lessthan0.9',
+             'brain_expressed','non_brain_expressed',
+             'SZ_GWAS_all', 'SZ_GWAS_closest', 'SZ_GWAS_credible_causal_US',
+             'NDD_CNVs_US', 'SZ_CNVs_US',
+             'SCHEMA_FDR_US')
+var_types<-list('PTV', 'REVEL75_Miss')
+dependent_var<-list('g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm')
+
+# Loop through each phenotype
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_NS))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+
+
+# Synonymous vars  
+var_types<-list('synonymous')
+for (dep_var in dependent_var) {
+  # Loop through each independent variable type
+  for (var in var_types) {
+    # Loop through each set
+    for (set in sets) {
+      independent_var <- paste0(var, '_AC', AC, '_', set, '_total')
+      formula <- as.formula(paste(dep_var, "~", independent_var, "+", covars_Eu_anc_syn))
+      model <- lm(formula, data = EU_ancs) 
+      tidy_model <- tidy(model)
+
+      # Extract outputs I need
+      if (nrow(tidy_model) > 0) {
+        beta <- tidy_model$estimate[2]
+        SE <- tidy_model$std.error[2]
+        conf_int <- confint(model)[2, ] 
+        p_value <- tidy_model$p.value[2]
+        with_phen=subset(EU_ancs, !is.na(EU_ancs[[dep_var]]))
+        n_people<-nrow(with_phen)
+        n_vars <- sum(with_phen[[independent_var]])
+        anc_set<-'EUR_only'
+        # Add to results data frame
+        results <- rbind(results, data.frame(
+          gene_set = set,
+          dep_var = dep_var,
+          indep_var = independent_var,
+          allele_count = AC,
+          beta = beta,
+          SE = SE,
+          lower_CI = conf_int[1],
+          upper_CI = conf_int[2],
+          p_value = p_value,
+          n_vars = n_vars,
+          n_people = n_people,
+          ancestry = anc_set,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+
+# Write out results 
+write.csv(results, 'results_g_regressions_AC21to50_diagnosesrm_incSE_Eurancs.csv')
+system('dx upload results_g_regressions_AC21to50_diagnosesrm_incSE_Eurancs.csv --destination ./Variant_counts/Gene_sets/')
+```
+
+
+
+

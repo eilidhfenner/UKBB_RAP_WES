@@ -1,0 +1,516 @@
+---
+title: "20_plot_results"
+output: html_document
+date: "2024-10-18"
+---
+
+# Plot results
+All results of regressions were downloaded from the RAP and results were plotted locally. 
+
+# Load libraries
+```{r}
+library(ggplot2)
+library(dplyr)
+y_title <- expression(paste("Beta of association with ", italic("g")))
+```
+# Read in results 
+```{r}
+results=read.csv('/Users/c1928239/OneDrive - Cardiff University/Cardiff/UKBB RAP work/results_g_regressions_AC5orless_diagnosesrm_incSE_crossancs.csv')
+
+
+additional_RR = read.csv('/Users/c1928239/OneDrive - Cardiff University/Cardiff/UKBB RAP work/reviewer_response/results_g_regressions_SMR_expressions.csv')
+smr_HC = read.csv('/Users/c1928239/OneDrive - Cardiff University/Cardiff/UKBB RAP work/results_g_regressions_SMR_expressions_FINAL_HConly.csv')
+additional_RR=rbind(additional_RR, smr_HC)
+
+ac21to50 = read.csv('/Users/c1928239/OneDrive - Cardiff University/Cardiff/UKBB RAP work/results_g_regressions_AC21to50_diagnosesrm_incSE_Eurancs.csv')
+ac11to20 = read.csv('/Users/c1928239/OneDrive - Cardiff University/Cardiff/UKBB RAP work/results_g_regressions_AC11to20_diagnosesrm_incSE_Eurancs.csv')
+ac6to10 = read.csv('/Users/c1928239/OneDrive - Cardiff University/Cardiff/UKBB RAP work/results_g_regressions_AC6to10_diagnosesrm_incSE_Eurancs.csv')
+additional_nocovar = read.csv('/Users/c1928239/OneDrive - Cardiff University/Cardiff/UKBB RAP work/results_g_regressions_no_probability_covars.csv')
+additional_EUR = read.csv('/Users/c1928239/OneDrive - Cardiff University/Cardiff/UKBB RAP work/results_g_regressions_strict_EUR.csv')
+results = rbind(results, additional_RR, ac21to50, ac11to20, ac6to10, additional_nocovar, additional_EUR)
+# Drop first col
+results <- results[,c(-1)]
+
+results <- results %>%
+  mutate(
+    ann = case_when(
+      grepl("^HC_PTV", indep_var) ~ "PTV  ",
+      grepl("^PTV", indep_var) ~ "All PTV  ",
+      grepl("REVEL75_", indep_var) ~ "Deleterious missense  ",
+      grepl("synon", indep_var) ~ "Synonymous  ",
+      TRUE ~ NA_character_
+    ),
+    ann = factor(
+      ann,
+      levels = c(
+        "PTV  ",
+        "All PTV  ",
+        "Deleterious missense  ",
+        "Synonymous  ")))
+
+results %>% count(ann)
+
+results %>% count(ancestry)
+all_results=results
+
+main_sets_eur_results=subset(all_results, all_results$ancestry=='EUR_only')
+main_sets_eur_results=subset(main_sets_eur_results, main_sets_eur_results$dep_var=='g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm')
+main_sets_eur_results = subset(main_sets_eur_results, main_sets_eur_results$ann!="All PTV  ")
+main_sets_eur_results = subset(main_sets_eur_results, main_sets_eur_results$allele_count=="5orless")
+
+lofi_results=subset(all_results, all_results$gene_set=='pLI_0.9')
+lofi_results=subset(lofi_results, lofi_results$dep_var=='g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm')
+
+
+Anc_specific_lofi_results=subset(lofi_results, lofi_results$ancestry=='ADM_ancs' |
+                                   lofi_results$ancestry=='EAS_ancs' |
+                                   lofi_results$ancestry=='SAS_ancs' |
+                                   lofi_results$ancestry=='SSA_ancs' |
+                                   lofi_results$ancestry=='EUR_only' |
+                                   lofi_results$ancestry=='AAC_ancs' |
+                                   lofi_results$ancestry=='LAT_ancs')
+Anc_specific_lofi_results = subset(Anc_specific_lofi_results, Anc_specific_lofi_results$ann!="All PTV  ")
+
+sex_strat_lofi_results=subset(lofi_results, lofi_results$ancestry=='EUR_only_females' |
+                                lofi_results$ancestry=='EUR_only' |
+                                lofi_results$ancestry=='EUR_only_males')
+
+cognitive_covars=subset(all_results, 
+                        all_results$ancestry=='EUR_only_covar_FI_AC1_n_correct_answers_Zscore' | 
+                          all_results$ancestry=='EUR_only_covar_Numeric_memory_online_maximum_digits_remembered_Zscore' | 
+                          all_results$ancestry=='EUR_only_covar_Pairs_matching_AC1_n_incorrect_matches_Z_score_outliersrm' | 
+                          all_results$ancestry=='EUR_only_covar_Reaction_time_AC1_mean_time_taken_Zscore_outliersrm' | 
+                          all_results$ancestry=='EUR_only_covar_SDS_online1_n_correct_cons_attempts_Zscore_outliersrm' | 
+                          all_results$ancestry=='EUR_only_covar_TMTA_online1_time_to_complete_numeric_path_Zscore_outliersrm' | 
+                          all_results$ancestry=='EUR_only_covar_TMTB_online1_time_to_complete_numeric_path_Zscore_outliersrm' | 
+                          all_results$ancestry=='EUR_only_covar_g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm' |
+                          (all_results$ancestry=='EUR_only' & all_results$dep_var!='g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm'))
+
+
+```
+
+
+# Constraint
+## Figure 1 - 1KPG-EUR-like ancs 
+```{r}
+# Lofi and lof tol in one plot
+gg=subset(main_sets_eur_results, main_sets_eur_results$gene_set=='non_constrained_pLI_lessthan0.9'| main_sets_eur_results$gene_set=='pLI_0.9')
+gg$Set[gg$gene_set=='non_constrained_pLI_lessthan0.9']<-'LoF-tolerant genes' 
+gg$Set[gg$gene_set=='pLI_0.9']<-'LoF-intolerant genes' 
+
+
+
+tiff("/Users/c1928239/Cardiff University/Psychosis Team - General/Rare_vars_cognition_UKB/MAC5_in_500kexomes/Submissions/Mol_psych/Resubmission/HC_PTVs_corrected/Final_versions/Fig1.tiff", units="in", width=12, height=10, res=300)
+ggplot(gg, aes(y=beta, x=Set, colour = ann, group=ann, shape=ann))  +
+  geom_pointrange(aes(ymin=lower_CI, ymax=upper_CI), position = position_dodge(width = 0.55), size=2.5) +
+  geom_hline(yintercept=0, linetype="dotted") +
+  theme_light() +
+  theme(text=element_text(size=25)) +
+  labs(y=y_title, x="\n Gene set", colour = 'Rare variant class  ', shape = 'Rare variant class  ') +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size=20),
+    legend.title = element_text(face="bold", size=22))
+dev.off()
+
+# Z test comparing pathogenic missense in LoFi to pathogenic missense in LoF-tol
+gg=subset(gg, gg$ann=="Deleterious missense")
+gg$z_val<-(((-0.03982036) - gg$beta)/sqrt((0.006854876)^2 + (gg$SE)^2))
+gg$z_test_p<-1-pnorm(abs(gg$z_val),0,1)
+```
+
+
+## Reviewer response - not covarying for probabilities
+```{r}
+# Lofi and lof tol in one plot
+gg=subset(lofi_results, lofi_results$gene_set=='pLI_0.9' & (lofi_results$ancestry=='EUR_only_no_probabilities' | lofi_results$ancestry=='EUR_only') & lofi_results$dep_var=='g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm')
+gg$Covariates[gg$ancestry=='EUR_only_no_probabilities']<-'Controlling for \n ancestry probabilities' 
+gg$Covariates[gg$ancestry=='EUR_only']<-'Not controlling for \n ancestry probabilities' 
+gg = subset(gg, gg$allele_count=="5orless")
+gg = subset(gg, gg$ann!="All PTV  ") 
+
+
+tiff("/Users/c1928239/OneDrive - Cardiff University/Cardiff/UKBB RAP work/reviewer_response/LoFi_controlling_for_anc_prob_HCPTV.tiff", units="in", width=12, height=10, res=400)
+ggplot(gg, aes(y=beta, x=Covariates, colour = ann, group=ann, shape=ann))  +
+  geom_pointrange(aes(ymin=lower_CI, ymax=upper_CI), position = position_dodge(width = 0.55), size=2.5) +
+  geom_hline(yintercept=0, linetype="dotted") +
+  theme_light() +
+  theme(text=element_text(size=25)) +
+  labs(y=y_title, x="\n Covariates", colour = 'Rare variant class  ', shape = 'Rare variant class  ') +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size=20),
+    legend.title = element_text(face="bold", size=22))
+dev.off()
+```
+
+
+## Reviewer response - strict EUR definition
+```{r}
+# Lofi and lof tol in one plot
+gg=subset(lofi_results, lofi_results$gene_set=='pLI_0.9' & (lofi_results$ancestry=='EUR_strict_only' | lofi_results$ancestry=='EUR_only') & lofi_results$dep_var=='g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm')
+gg$Covariates[gg$ancestry=='EUR_only']<-'> 0.8' 
+gg$Covariates[gg$ancestry=='EUR_strict_only']<-'> 0.99'
+gg = subset(gg, gg$allele_count=="5orless")
+gg = subset(gg, gg$ann!="All PTV  ") 
+
+
+tiff("/Users/c1928239/OneDrive - Cardiff University/Cardiff/UKBB RAP work/reviewer_response/LoFi_EUR_strict_HCPTV.tiff", units="in", width=12, height=10, res=400)
+ggplot(gg, aes(y=beta, x=Covariates, colour = ann, group=ann, shape=ann))  +
+  geom_pointrange(aes(ymin=lower_CI, ymax=upper_CI), position = position_dodge(width = 0.55), size=2.5) +
+  geom_hline(yintercept=0, linetype="dotted") +
+  theme_light() +
+  theme(text=element_text(size=25)) +
+  labs(y=y_title, x="\n 1KGP-EUR-like ancestry probability", colour = 'Rare variant class  ', shape = 'Rare variant class  ') +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size=20),
+    legend.title = element_text(face="bold", size=22))
+dev.off()
+```
+
+## Reviewer response - less rare variants
+```{r}
+# Lofi and lof tol in one plot
+gg=subset(lofi_results, lofi_results$gene_set=='pLI_0.9' & 
+            lofi_results$ancestry=='EUR_only' & 
+            lofi_results$dep_var=='g_MAIN_RT_TMTB_NM_PM_zscore_outliersrm' & 
+            lofi_results$ann!="Benign missense  " & 
+            lofi_results$ann!="Mid missense  ")
+
+gg$AC[gg$allele_count=='5orless']<-'≤ 5'
+gg$AC[gg$allele_count=='6to10']<-'6 to 10'
+gg$AC[gg$allele_count=='11to20']<-'11 to 20'
+gg$AC[gg$allele_count=='21to50']<-'21 to 50'
+gg<- gg %>% mutate(AC = factor(AC, levels = c('≤ 5',
+                                              '6 to 10',
+                                              '11 to 20',
+                                              '21 to 50')))
+
+gg=subset(gg,gg$ann!='Synonymous  ' & gg$ann!="All PTV  ")
+
+
+tiff("/Users/c1928239/OneDrive - Cardiff University/Cardiff/UKBB RAP work/reviewer_response/LoFi_ACupto50_nosyn_HCPTV.tiff",
+     units="in", width=12, height=10, res=400)
+ggplot(gg, aes(y=beta, x=AC, colour = ann, group=ann, shape=ann)) +
+  geom_pointrange(aes(ymin=lower_CI, ymax=upper_CI),
+                  position = position_dodge(width = 0.55),
+                  size = 2.5) +
+  geom_hline(yintercept = 0, linetype = "dotted") +
+  scale_colour_manual(values = c("#F8766D", "#00BA38"))+
+  theme_light() +
+  theme(text = element_text(size = 25),
+        legend.position = "bottom",
+        legend.text = element_text(size = 20),
+        legend.title = element_text(face="bold", size=22)) +
+  labs(y = y_title, x = "\nAllele count",
+       colour = 'Rare variant class  ',
+       shape = 'Rare variant class  ')
+dev.off()
+```
+
+
+## Sex strat - supp figure 7
+```{r}
+gg=subset(sex_strat_lofi_results, sex_strat_lofi_results$gene_set=='pLI_0.9' & gg$ann!="All PTV  ")
+gg$sex[gg$ancestry=='EUR_only']<-'Both sexes'
+gg$sex[gg$ancestry=='EUR_only_males']<-'Males'
+gg$sex[gg$ancestry=='EUR_only_females']<-'Females'
+
+tiff("/Users/c1928239/OneDrive - Cardiff University/Cardiff/UKBB RAP work/constraint_AC5orless_assocs_EU_ancs_sexstrat_HCPTV.tiff", units="in", width=12, height=10, res=400)
+ggplot(gg, aes(y=beta, x=ann, colour = ann, group=sex, shape=sex))  +
+  geom_pointrange(aes(ymin=lower_CI, ymax=upper_CI), position = position_dodge(width = 0.55), size=2.5)+
+  geom_hline(yintercept=0, linetype="dotted")+
+  theme_light()+
+  theme(text=element_text(size=25))+
+  labs(y=y_title, x="\n Variant class \n")+
+  theme(legend.position="bottom")+
+  theme(legend.text = element_text(size=20))+
+  guides(colour=guide_legend(title=NULL))  
+dev.off()
+
+```
+
+## Brain expression and lof tolerance
+```{r}
+gg=subset(main_sets_eur_results, main_sets_eur_results$gene_set=='brain_expressed'| 
+            main_sets_eur_results$gene_set== 'non_brain_expressed')
+
+gg=subset(main_sets_eur_results, main_sets_eur_results$gene_set=='brain_expressed_LoFi'| 
+            main_sets_eur_results$gene_set== 'non_brain_expressed_LoFi')
+
+# brain expressed lofi vs non brain expressed lofi
+# miss
+z=subset(gg, gg$ann=="Deleterious missense  ")
+z$z_val<-(((-0.03959504) - z$beta)/sqrt((0.007813874)^2 + (z$SE)^2))
+z$z_test_p<-1-pnorm(abs(z$z_val),0,1) # Chec the one for revel.75 ==0.5
+
+# PTVs
+z=subset(gg, gg$ann=="PTV  ")
+z$z_val<-(((-0.08125993) - z$beta)/sqrt((0.008536732)^2 + (z$SE)^2))
+z$z_test_p<-1-pnorm(abs(z$z_val),0,1)
+
+
+gg=subset(main_sets_eur_results, main_sets_eur_results$gene_set=='brain_expressed_LoFtolerant'| 
+            main_sets_eur_results$gene_set== 'non_brain_expressed_LoFtolerant')
+
+```
+
+
+
+# Figure 2 - SCHEMA FDR genes 
+```{r}
+gg=subset(results, results$gene_set=='SCHEMA_FDR_US')
+gg = subset(gg, gg$allele_count=="5orless")
+gg = subset(gg, gg$ann!="All PTV  ") 
+gg$Set<-'SCHEMA FDR < 5% genes'
+
+
+tiff("/Users/c1928239/Cardiff University/Psychosis Team - General/Rare_vars_cognition_UKB/MAC5_in_500kexomes/Submissions/Mol_psych/Resubmission/HC_PTVs_corrected/Final_versions/Fig2.tiff", units="in", width=12, height=10, res=300)
+ggplot(gg, aes(y=beta, x=Set, colour = ann, group=ann, shape=ann))  +
+  geom_pointrange(aes(ymin=lower_CI, ymax=upper_CI), position = position_dodge(width = 0.55), size=2.5)+
+  geom_hline(yintercept=0, linetype="dotted")+
+  theme_light()+
+  theme(text=element_text(size=25))+
+  labs(y=y_title, x="\n Gene set", colour = 'Rare variant class  ', shape = 'Rare variant class  ') +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size=20),
+    legend.title = element_text(face="bold", size=22))
+dev.off()
+  
+
+
+# And z test 
+## lofi vs schema
+gg=subset(results, results$gene_set=='SCHEMA_FDR_US'|  results$gene_set=='LoFi_minus_SCHEMA_FDR_US')
+gg = subset(gg, gg$allele_count=="5orless")
+z=subset(gg, gg$ann=="PTV  ")
+z$z_val<-(((-0.26935603) - z$beta)/sqrt((0.07336903)^2 + (z$SE)^2))
+z$z_test_p<-1-pnorm(abs(z$z_val),0,1) 
+# brain expression vs schema
+gg=subset(results, results$gene_set=='SCHEMA_FDR_US'|  results$gene_set=='BE_minus_SCHEMA_FDR_US')
+gg = subset(gg, gg$allele_count=="5orless")
+z=subset(gg, gg$ann=="PTV  ")
+z$z_val<-(((-0.26935603) - z$beta)/sqrt((0.07336903)^2 + (z$SE)^2))
+z$z_test_p<-1-pnorm(abs(z$z_val),0,1) # Chec the one for revel.75 ==0.5
+
+```
+
+# Figure 3 -  GWAS genes
+```{r}
+# three sets in one plot
+gg=subset(results, results$gene_set=='SZ_GWAS_closest'| results$gene_set=='SZ_GWAS_all' | results$gene_set=='SZ_GWAS_credible_causal_US')
+gg = subset(gg, gg$allele_count=="5orless")
+gg = subset(gg, gg$ann!="All PTV  ") 
+
+gg$Set[gg$gene_set=='SZ_GWAS_closest']<-'Genes nearest to the \n locus index SNPs in \n the SZ GWAS' 
+gg$Set[gg$gene_set=='SZ_GWAS_all']<-'All genes within \n SZ GWAS loci'
+gg$Set[gg$gene_set=='SZ_GWAS_credible_causal_US']<-'Genes prioritised as \n credible-causal in the \n SZ GWAS'
+
+gg<- gg %>% mutate(Set = factor(Set, levels = c('All genes within \n SZ GWAS loci', 
+                                                'Genes nearest to the \n locus index SNPs in \n the SZ GWAS' , 
+                                                'Genes prioritised as \n credible-causal in the \n SZ GWAS')))
+
+
+tiff("/Users/c1928239/Cardiff University/Psychosis Team - General/Rare_vars_cognition_UKB/MAC5_in_500kexomes/Submissions/Mol_psych/Resubmission/HC_PTVs_corrected/Final_versions/Fig3.tiff", units="in", width=12, height=10, res=400)
+ggplot(gg, aes(y=beta, x=Set, colour = ann, group=ann, shape=ann))  +
+  geom_pointrange(aes(ymin=lower_CI, ymax=upper_CI), position = position_dodge(width = 0.55), size=2.5)+
+  geom_hline(yintercept=0, linetype="dotted")+
+  theme_light()+
+  theme(text=element_text(size=25))+
+  labs(y=y_title, x="\n Gene set", colour = 'Rare variant class  ', shape = 'Rare variant class  ') +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size=20),
+    legend.title = element_text(face="bold", size=22))
+dev.off()
+
+# Additional sets
+gg=subset(results, results$gene_set=='non_prioritised_GWAS'| results$gene_set=='Finemap_prioritised_GWAS' | results$gene_set=='SMR_prioritised_GWAS' | results$gene_set=='SZ_GWAS_closest'| results$gene_set=='SZ_GWAS_all' | results$gene_set=='SZ_GWAS_credible_causal_US')
+gg<- gg %>% mutate(gene_set = factor(gene_set, levels = c('non_prioritised_GWAS', 
+                                                'Finemap_prioritised_GWAS' , 
+                                                'SMR_prioritised_GWAS')))
+gg = subset(gg, gg$allele_count=="5orless")
+gg = subset(gg, gg$ann!="All PTV  ") 
+
+# Comparisons
+gg=subset(results, results$gene_set=='non_prioritised_GWAS'| results$gene_set=='Finemap_prioritised_GWAS' | results$gene_set=='SMR_prioritised_GWAS' | results$gene_set=='SZ_GWAS_closest'| results$gene_set=='SZ_GWAS_all' | results$gene_set=='SZ_GWAS_credible_causal_US')
+# And z tests
+gg=subset(results, results$gene_set=='SZ_GWAS_credible_causal_US'|  results$gene_set=='non_prioritised_GWAS')
+z=subset(gg, gg$ann=="Deleterious missense")
+z$z_val<-(((-0.118096306) - z$beta)/sqrt((0.03392730)^2 + (z$SE)^2))
+z$z_test_p<-1-pnorm(abs(z$z_val),0,1) # Chec the one for revel.75 ==0.5
+
+gg=subset(results, results$gene_set=='SZ_GWAS_credible_causal_US'|  results$gene_set=='LoFi_minus_credible_causal_GWAS')
+z=subset(gg, gg$ann=="Deleterious missense")
+z$z_val<-(((-0.118096306) - z$beta)/sqrt((0.03392730)^2 + (z$SE)^2))
+z$z_test_p<-1-pnorm(abs(z$z_val),0,1) # Chec the one for revel.75 ==0.5
+
+gg=subset(results, results$gene_set=='SZ_GWAS_credible_causal_US'|  results$gene_set=='Brain_expressed_minus_credible_causal_GWAS')
+z=subset(gg, gg$ann=="Deleterious missense")
+z$z_val<-(((-0.118096306) - z$beta)/sqrt((0.03392730)^2 + (z$SE)^2))
+z$z_test_p<-1-pnorm(abs(z$z_val),0,1) # Chec the one for revel.75 ==0.5
+
+gg=subset(results, results$gene_set=='SMR_prioritised_GWAS'|  results$gene_set=='Brain_expressed_minus_SMR_prioritised_GWAS')
+z=subset(gg, gg$ann=="Deleterious missense")
+z$z_val<-(((-0.11816858) - z$beta)/sqrt((0.05911149)^2 + (z$SE)^2))
+z$z_test_p<-1-pnorm(abs(z$z_val),0,1) # Chec the one for revel.75 ==0.5
+```
+
+# Supplementary FIgure 8
+```{r}
+gg=subset(results, results$gene_set=='SZ_GWAS_credible_causal_US'| 
+            results$gene_set=='Finemap_prioritised_GWAS' | 
+            results$gene_set=='SMR_prioritised_GWAS')
+gg$Set[gg$gene_set=='Finemap_prioritised_GWAS']<-'Finemap prioritised \n genes' 
+gg$Set[gg$gene_set=='SMR_prioritised_GWAS']<-'SMR prioritised \n genes'
+gg$Set[gg$gene_set=='SZ_GWAS_credible_causal_US']<-'Genes prioritised as \n credible-causal in the \n SZ GWAS'
+
+gg<- gg %>% mutate(Set = factor(Set, levels = c( 'Genes prioritised as \n credible-causal in the \n SZ GWAS', 
+                                                 'Finemap prioritised \n genes',
+                                                 'SMR prioritised \n genes')))
+
+gg = subset(gg, gg$allele_count=="5orless")
+gg = subset(gg, gg$ann!="All PTV  ") 
+                                            
+
+tiff("/Users/c1928239/OneDrive - Cardiff University/Cardiff/UKBB RAP work/GWAS_diffprior_sets_AC5orless_assocs_EU_anc_HCPTV.tiff", units="in", width=12, height=10, res=400)
+ggplot(gg, aes(y=beta, x=Set, colour = ann, group=ann, shape=ann))  +
+  geom_pointrange(aes(ymin=lower_CI, ymax=upper_CI), position = position_dodge(width = 0.55), size=2.5)+
+  geom_hline(yintercept=0, linetype="dotted")+
+  theme_light()+
+  theme(text=element_text(size=25))+
+  labs(y=y_title, x="\n Gene set", colour = 'Rare variant class  ', shape = 'Rare variant class  ') +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size=20),
+    legend.title = element_text(face="bold", size=22))
+dev.off()
+
+```
+
+## Response to reviewer
+```{r}
+gg=read.csv('/Users/c1928239/OneDrive - Cardiff University/Cardiff/UKBB RAP work/results_g_regressions_SMR_expressions_FINAL.csv')
+gg=subset(results, results$gene_set=='SMR_prioritised_positive_expression'| 
+            results$gene_set=='SMR_prioritised_negative_expression' | 
+            results$gene_set=='SMR_prioritised_GWAS')
+gg$Set[gg$gene_set=='SMR_prioritised_negative_expression']<-'SMR prioritised \n negative expression' 
+gg$Set[gg$gene_set=='SMR_prioritised_GWAS']<-'SMR prioritised \n genes'
+gg$Set[gg$gene_set=='SMR_prioritised_positive_expression']<-'SMR prioritised \n positive expression' 
+
+gg<- gg %>% mutate(Set = factor(Set, levels = c('SMR prioritised \n genes',
+                                                'SMR prioritised \n negative expression',
+                                                'SMR prioritised \n positive expression' )))
+                                            
+
+tiff("/Users/c1928239/OneDrive - Cardiff University/Cardiff/UKBB RAP work/reviewer_response/SMR_expression_sets_AC5orless_assocs_EU_ancs.tiff", units="in", width=12, height=10, res=400)
+ggplot(gg, aes(y=beta, x=Set, colour = ann, group=ann, shape=ann))  +
+  geom_pointrange(aes(ymin=lower_CI, ymax=upper_CI), position = position_dodge(width = 0.55), size=2.5)+
+  geom_hline(yintercept=0, linetype="dotted")+
+  theme_light()+
+  theme(text=element_text(size=25))+
+  labs(y=y_title, x="\n Gene set", colour = 'Rare variant class  ', shape = 'Rare variant class  ') +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size=20),
+    legend.title = element_text(face="bold", size=22))
+dev.off()
+
+```
+
+
+# Figure 6 - CNVs
+```{r}
+# three sets in one plot
+gg=subset(results, results$gene_set=='NDD_CNVs_US' | results$gene_set=='LoFi_in_NDD_CNVs_US' | results$gene_set=='LoFtolerant_in_NDD_CNVs_US')
+          
+gg$Set[gg$gene_set=='NDD_CNVs_US']<-'All genes within \n schizophrenia-enriched \n CNV loci' 
+gg$Set[gg$gene_set=='LoFi_in_NDD_CNVs_US']<-'LoFi genes within \n schizophrenia-enriched \n CNV loci'
+gg$Set[gg$gene_set=='LoFtolerant_in_NDD_CNVs_US']<-'LoF-tolerant genes \n within schizophrenia- \n enriched CNV loci'
+
+gg<- gg %>% mutate(Set = factor(Set, levels = c('All genes within \n schizophrenia-enriched \n CNV loci',
+                                                'LoFi genes within \n schizophrenia-enriched \n CNV loci',
+                                                'LoF-tolerant genes \n within schizophrenia- \n enriched CNV loci')))
+gg=subset(gg, gg$allele_count=='5orless')
+gg = subset(gg, gg$ann!="All PTV  ") 
+gg=subset(gg, gg$ann!='Mid missense  ' & gg$ann!='Benign missense  ')
+
+tiff("/Users/c1928239/OneDrive - Cardiff University/Cardiff/UKBB RAP work/reviewer_response/szenrichedCNV_sets_AC5orless_assocs_EU_ancs_RR.tiff", units="in", width=12, height=10, res=400)
+ggplot(gg, aes(y=beta, x=Set, colour = ann, group=ann, shape=ann))  +
+  geom_pointrange(aes(ymin=lower_CI, ymax=upper_CI), position = position_dodge(width = 0.55), size=2.5)+
+  geom_hline(yintercept=0, linetype="dotted")+
+  geom_hline(yintercept = -0.061106926, linetype="dashed",  color = "red")+
+  geom_hline(yintercept = -0.040470416, linetype="dashed",  color = "green3")+
+  theme_light()+
+  theme(text=element_text(size=25))+
+  labs(y=y_title, x="\n Gene set", colour = 'Rare variant class  ', shape = 'Rare variant class  ') +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size=20),
+    legend.title = element_text(face="bold", size=22))
+dev.off()
+
+# And z tests
+gg=subset(results, results$gene_set=='LoFi_in_NDD_CNVs_US'|  results$gene_set=='LoFi_minus_NDD_CNVs_US')
+z=subset(gg, gg$ann=="PTV  ")
+z$z_val<-(((-0.10759518) - z$beta)/sqrt((0.035788885)^2 + (z$SE)^2))
+z$z_test_p<-1-pnorm(abs(z$z_val),0,1) # Chec the one for revel.75 ==0.5
+
+
+```
+
+## SZ CNVs
+```{r}
+# three sets in one plot
+gg=subset(results, results$gene_set=='SZ_CNVs_US' | results$gene_set=='LoFi_in_SZ_CNVs_US' | results$gene_set=='LoFtolerant_in_SZ_CNVs_US')
+gg=subset(gg, gg$allele_count=='5orless')
+gg = subset(gg, gg$ann!="All PTV  ") 
+gg$Set[gg$gene_set=='SZ_CNVs_US']<-'All genes within \n schizophrenia-associated \n CNV loci' 
+gg$Set[gg$gene_set=='LoFi_in_SZ_CNVs_US']<-'LoFi genes within \n schizophrenia-associated \n CNV loci'
+gg$Set[gg$gene_set=='LoFtolerant_in_SZ_CNVs_US']<-'LoF-tolerant genes \n within schizophrenia- \n associated CNV loci'
+
+gg<- gg %>% mutate(Set = factor(Set, levels = c('All genes within \n schizophrenia-associated \n CNV loci',
+                                                'LoFi genes within \n schizophrenia-associated \n CNV loci',
+                                                'LoF-tolerant genes \n within schizophrenia- \n associated CNV loci')))
+
+
+```
+
+# Single gene burden tests
+```{r}
+ptv=read.csv('/Users/c1928239/OneDrive - Cardiff University/Cardiff/UKBB RAP work/HC_PTV_EUR_anc_AC5orless_single_gene_burden.csv')
+ptv$variant<-'Rare PTVs'
+miss=read.csv('/Users/c1928239/OneDrive - Cardiff University/Cardiff/UKBB RAP work/REVEL75_Miss_EUR_anc_AC5orless_single_gene_burden.csv')
+miss$variant<-'Rare deleterious missense variants'
+both=read.csv('/Users/c1928239/OneDrive - Cardiff University/Cardiff/UKBB RAP work/HC_PTVs_and_Miss_EUR_anc_AC5orless_single_gene_burden.csv')
+both$variant<-'Rare PTVs + deleterious missense'
+gene_annotations=read.csv('/Users/c1928239/OneDrive - Cardiff University/Cardiff/UKBB RAP work/single_gene_info.csv')
+
+single_gene=rbind(ptv, miss, both)
+single_gene <- merge(gene_annotations, single_gene,
+  by.x = c("Ensembl.ID", "Variant.class"),
+  by.y = c('gene_set', 'variant'),
+  all.y = TRUE)
+all_single_gene<-single_gene[,c(3,1,2,4:9,14:19)]
+
+
+
+
+write.csv(all_single_gene, '/Users/c1928239/OneDrive - Cardiff University/Cardiff/UKBB RAP work/MAC5_HCPTV_single_gene_results.csv', row.names = F)
+
+all_single_gene_5andmore=all_single_gene
+all_single_gene_5andmore$beta[all_single_gene_5andmore$n_vars<5]<-NA
+all_single_gene_5andmore$SE[all_single_gene_5andmore$n_vars<5]<-NA
+all_single_gene_5andmore$lower_CI[all_single_gene_5andmore$n_vars<5]<-NA
+all_single_gene_5andmore$upper_CI[all_single_gene_5andmore$n_vars<5]<-NA
+all_single_gene_5andmore$p_value[all_single_gene_5andmore$n_vars<5]<-NA
+all_single_gene_5andmore$n_vars[all_single_gene_5andmore$n_vars<5]<-'<5'
+write.csv(all_single_gene_5andmore, '/Users/c1928239/OneDrive - Cardiff University/Cardiff/UKBB RAP work/MAC5_HCPTV_single_gene_results_fewerthan5rm.csv', row.names = F)
+```
+
+
+
+
+

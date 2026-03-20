@@ -1,0 +1,178 @@
+---
+title: "Variant_QC_metrics"
+output: html_document
+---
+# 2: Variant-level QC 
+This script reads in variant QC tables which were written out in stage 1 of processing following genotype QC. These are processed into a format that is easy to work with, and then variant QC metrics are plotted. I ran this using a mem2_ssd2_v2_x48 instance, and the cost to run this script was around £4. 
+
+## Running .Rmd scripts in the RAP 
+To work on the RMarkdown environment in RAP, you need to download scripts from your project. You can do this using dx download in the terminal in RMd ('dx downlaod ./path/to/script.Rmd') and then opening this from the environment. When you're done with editing your script, save it in Rmd and then use the final command in this script to upload the updated version to your project. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(ggplot2)
+library(tibble)
+library(ggplot2)
+```
+
+## Read in variant QC metrics and reformat for each chromosome, then read all into one big QC table 
+### Prepare a function to read in and clean data: 
+```{r}
+process_chromosome <- function(chr_number) {
+  file_path<-paste0('/mnt/project/sample_and_var_QC_metrics/chr_', chr_number, "_post_geno_QC_var_qc.csv")
+  # Read in data
+  s <- read.csv(file_path, header = FALSE)
+  
+  # Remove row 1
+  s <- s[-1,]
+  
+  # Reformat columns
+  for (i in 2:27) {
+    s[, i] <- gsub("\\[|\\]", "", s[, i])
+    s[, i] <- sub("^.*:", "", s[, i], perl = TRUE)
+    
+    if (i %in% c(7,11,27)) {
+      s[, i] <- substr(s[, i], 1, nchar(s[, i]) - 1)
+    }
+  }
+  
+  # Rename columns
+  names(s)[names(s) == "V1"] <- "Locus"
+  names(s)[names(s) == "V2"] <- "Ref_allele"
+  names(s)[names(s) == "V3"] <- "Alternate_allele"
+  names(s)[names(s) == "V4"] <- "Dp_stats_mean"
+  names(s)[names(s) == "V5"] <- "Dp_stats_stdev"
+  names(s)[names(s) == "V6"] <- "Dp_stats_min"
+  names(s)[names(s) == "V7"] <- "Dp_stats_max"
+  names(s)[names(s) == "V8"] <- "GQ_stats_mean"
+  names(s)[names(s) == "V9"] <- "GQ_stats_stdev"
+  names(s)[names(s) == "V10"] <- "GQ_stats_min"
+  names(s)[names(s) == "V11"] <- "GQ_stats_max"
+  names(s)[names(s) == "V12"] <- "Allele_count_major"
+  names(s)[names(s) == "V13"] <- "Allele_count_minor"
+  names(s)[names(s) == "V14"] <- "Major_allele_frequency"
+  names(s)[names(s) == "V15"] <- "Minor_allele_frequency"
+  names(s)[names(s) == "V16"] <- "AN"
+  names(s)[names(s) == "V17"] <- "Homozygote_count_major"
+  names(s)[names(s) == "V18"] <- "Homozygote_count_minor"
+  names(s)[names(s) == "V19"] <- "Call_rate"
+  names(s)[names(s) == "V20"] <- "n_called"
+  names(s)[names(s) == "V21"] <- "n_not_called"
+  names(s)[names(s) == "V22"] <- "n_filtered"
+  names(s)[names(s) == "V23"] <- "n_het"
+  names(s)[names(s) == "V24"] <- "n_non_ref"
+  names(s)[names(s) == "V25"] <- "het_freq_hwe"
+  names(s)[names(s) == "V26"] <- "p_hwe"
+  names(s)[names(s) == "V27"] <- "p_excess_het"
+  # Return processed data
+  return(s)
+}
+```
+
+### Merge together and save out
+Initialize an empty data frame to store the merged data, then process and merge data for each chromosome
+```{r}
+merged_data <- data.frame()
+
+chromosome_numbers <- c(1:24)
+for (chr_number in chromosome_numbers) {
+  processed_data <- process_chromosome(chr_number)
+  merged_data <- rbind(merged_data, processed_data)
+}
+```
+
+Write the merged data to a CSV file in the environment
+```{r}
+write.csv(merged_data, file = 'variant_qc_all_chr.csv')
+```
+Then save it back to project storage
+```{r}
+system("dx upload variant_qc_all_chr.csv --destination ./sample_and_var_QC_metrics/")
+```
+
+## Visualise variant QC metrics 
+```{r}
+s <- data.frame(sapply(merged_data, as.numeric))
+```
+
+Filter out Y chromosome before visualising metrics and deciding cutoffs:
+```{r}
+colnames(s)
+s <- s %>% filter(!grepl("chrY", Locus)) 
+```
+Depth:
+```{r}
+tiff("seq_depth_varQC.tiff", width = 10, height = 6, units = "in", res = 400)
+ggplot(s, aes(Dp_stats_mean))+
+  geom_histogram(bin_width=2,fill = "lightblue", color = "lightblue")+
+  ggtitle('Mean sequencing depth per variant')+
+  xlab('Mean sequencing depth')+
+  theme_light()
+dev.off()
+```
+
+Genotype quality: 
+```{r}
+tiff("genotype_quality_varQC.tiff", width = 10, height = 6, units = "in", res = 400)
+ggplot(s, aes(GQ_stats_mean))+
+  geom_histogram(binwidth=1, fill = "lightblue", color = "lightblue")+
+  ggtitle('Mean genotype quality per variant')+
+  xlab('Mean genotype quality')+
+  theme_light()+
+  geom_vline(xintercept = 30, colour='lightpink')+
+  geom_vline(xintercept = 40, colour='lightpink', linetype='dashed')
+dev.off()
+```
+
+## Call rate
+```{r}
+tiff("call_rate_varQC.tiff", width = 10, height = 6, units = "in", res = 400)
+ggplot(s, aes(Call_rate))+
+  geom_histogram(binwidth=0.01,   fill = "lightblue", color = "lightblue")+
+  ggtitle('Call rate per variant')+
+  xlab('Call rate')+
+  theme_light()+
+  geom_vline(xintercept = 0.7, colour='lightpink')+
+  geom_vline(xintercept = 0.9, colour='lightpink', linetype='dashed')
+dev.off()
+```
+
+# Plots for manuscript
+```{r}
+system('dx download ./sample_and_var_QC_metrics/variant_qc_all_chr.csv')
+a=read.csv('variant_qc_all_chr.csv')
+library(scales)
+
+
+tiff("variant_mean_GQ.tiff", units="in", width=12, height=8, res=400)
+ggplot(a, aes(GQ_stats_mean)) +
+  geom_histogram(binwidth = 0.5)+
+  labs(x = '\n Mean genotype quality', y = 'Count') +
+  theme_minimal() +
+  geom_vline(xintercept = 40, color = 'red') +
+  theme(text=element_text(size=25))+
+  scale_y_continuous(labels = comma)
+dev.off()
+
+
+tiff("variant_call_rate.tiff", units="in", width=12, height=8, res=400)
+ggplot(a, aes(Call_rate)) +
+  geom_histogram(binwidth = 0.005)+
+  labs(x = '\n Call rate', y = 'Count') +
+  theme_minimal() +
+  geom_vline(xintercept = 0.9, color = 'red') +
+  theme(text=element_text(size=25))+
+  scale_y_continuous(labels = comma)
+dev.off()
+
+
+```
+
+# Save notebook and plots to project storage
+```{r}
+system("dx upload 2_variant_QC.Rmd --destination ./Scripts/")
+system("dx upload *.tiff --destination ./sample_and_var_QC_metrics")
+```
+
+
